@@ -92,5 +92,6 @@ The pinned corpus and its provenance rules are documented in
 `tests/snes-test-roms/README.md`. Ordinary Cargo tests do not download or
 require ROMs. Bounded execution is diagnostic unless a case has a verified
 memory, register, timing, audio, or framebuffer oracle. The ten enabled
-PeterLemon PPU cases are strict framebuffer gates; other visual examples
-remain diagnostic until their oracle and modeled hardware are sufficient.
+PeterLemon PPU cases are strict framebuffer gates, and the documented gilyon
+SPC700 ROM is a strict result-protocol gate; other visual examples remain
+diagnostic until their oracle and modeled hardware are sufficient.

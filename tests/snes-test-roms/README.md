@@ -103,6 +103,14 @@ cargo run -p snes-render --bin snes-acceptance
 cargo run -p snes-render --bin snes-acceptance -- --case peterlemon-cpuadc
 ```
 
+The same enabled cases can run as an opt-in Rust integration test, matching
+the NES repository's ROM-test workflow while keeping ordinary workspace tests
+offline and corpus-independent:
+
+```sh
+SNES_RUN_ACCEPTANCE=1 cargo test -p snes-render --test acceptance
+```
+
 Each case records its source ID, immutable source revision, ROM SHA-256,
 execution bound, capture frame, reference dimensions/format, tolerance, mask,
 and artifact name. A strict case exits nonzero on a missing reference or frame
@@ -148,6 +156,11 @@ one file-count or exit-status check:
 | SingleStepTests `v1/*.json` | Initial/final CPU state, memory, and the applicable bus-access sequence. |
 | PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. Ten 256x224 PPU pairs are strict exact-match gates (zero tolerance, empty masks); captures requiring 512x448/interlace output or unsupported reference formats remain diagnostic. |
 | higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`) and gilyon's SPC700 port `$2140` result (`0=running`, `1=passed`, `2=failed`). |
+
+The currently enabled suite contains eleven strict cases: the ten exact
+PeterLemon PPU captures plus gilyon's documented SPC700 instruction-suite ROM.
+The latter publishes success briefly before returning to the IPL; the harness
+latches the passing result at the instruction that reports it.
 
 The corpus also contains `.spc`, `.bin`, source, and standalone image files.
 Those are fixtures for a future subsystem harness, not bootable SNES ROM cases.

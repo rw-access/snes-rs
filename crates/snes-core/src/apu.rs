@@ -892,23 +892,30 @@ impl Spc700 {
                 // MOV X,A.  This is used by the IPL's indirect jump at
                 // $FFF8 after it assembles the upload destination pointer.
                 self.x = self.a;
+                self.set_zero_negative(self.x);
                 2
             }
             0x7d => {
                 // MOV A,X.
                 self.a = self.x;
+                self.set_zero_negative(self.a);
                 2
             }
             0xdd => {
-                self.y = self.a;
+                // MOV A,Y.
+                self.a = self.y;
+                self.set_zero_negative(self.a);
                 2
             }
             0xfd => {
-                self.a = self.y;
+                // MOV Y,A.
+                self.y = self.a;
+                self.set_zero_negative(self.y);
                 2
             }
             0x9d => {
                 self.x = self.sp;
+                self.set_zero_negative(self.x);
                 2
             }
             0xbd => {
@@ -971,7 +978,7 @@ impl Spc700 {
             0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xb0 => {
                 let offset = self.fetch(ram) as i8;
                 let take = match opcode {
-                    0x10 => self.psw & 0x02 == 0,
+                    0x10 => self.psw & 0x80 == 0,
                     0x30 => self.psw & 0x80 != 0,
                     0x50 => self.psw & 0x40 == 0,
                     0x70 => self.psw & 0x40 != 0,
@@ -2051,6 +2058,17 @@ mod tests {
             assert_eq!(apu.spc700.pc, 0x0104, "opcode {opcode:02x}");
         }
 
+        for (psw, expected_pc, expected_cycles) in
+            [(0x00, 0x0104, 4), (0x02, 0x0104, 4), (0x80, 0x0102, 2)]
+        {
+            let mut apu = Apu::default();
+            apu.spc700.pc = 0x0100;
+            apu.spc700.psw = psw;
+            apu.ram[0x0100..0x0102].copy_from_slice(&[0x10, 0x02]); // BPL +2
+            assert_eq!(apu.step_spc700(), expected_cycles, "BPL PSW {psw:02x}");
+            assert_eq!(apu.spc700.pc, expected_pc, "BPL PSW {psw:02x}");
+        }
+
         let mut apu = Apu::default();
         apu.ram[..2].copy_from_slice(&[0xb0, 0x02]);
         assert_eq!(apu.step_spc700(), 2);
@@ -2095,10 +2113,11 @@ mod tests {
     #[test]
     fn spc700_register_transfers_and_stack_forms_round_trip() {
         let mut apu = Apu::default();
-        apu.ram[..16].copy_from_slice(&[
+        apu.ram[..21].copy_from_slice(&[
             0xe8, 0xa5, // MOV A,#$a5
             0x5d, // MOV X,A
-            0xdd, // MOV Y,A
+            0x8d, 0x3c, // MOV Y,#$3c
+            0xdd, // MOV A,Y
             0x4d, // PUSH X
             0x6d, // PUSH Y
             0xe8, 0x00, // MOV A,#$00
@@ -2108,18 +2127,20 @@ mod tests {
             0x0d, // PUSH PSW
             0xe8, 0x00, // MOV A,#$00
             0x8e, // POP PSW
-            0xfd, // MOV A,Y
+            0xe8, 0x5a, // MOV A,#$5a
+            0xfd, // MOV Y,A
+            0x7d, // MOV A,X
         ]);
 
-        for _ in 0..13 {
+        for _ in 0..16 {
             apu.step_spc700();
         }
 
         assert_eq!(apu.spc700.a, 0xa5);
         assert_eq!(apu.spc700.x, 0xa5);
-        assert_eq!(apu.spc700.y, 0xa5);
+        assert_eq!(apu.spc700.y, 0x5a);
         assert_eq!(apu.spc700.sp, 0xef);
-        assert_eq!(apu.spc700.psw & 0x82, 0x02);
+        assert_eq!(apu.spc700.psw & 0x82, 0x80);
     }
 
     #[test]
@@ -2140,23 +2161,31 @@ mod tests {
     }
 
     #[test]
-    fn spc700_register_transfers_preserve_condition_codes() {
+    fn spc700_register_transfers_set_flags_and_use_correct_sources() {
         let mut apu = Apu::default();
         apu.spc700.psw = 0x49;
         apu.spc700.sp = 0xef;
-        apu.ram[..7].copy_from_slice(&[
-            0xe8, 0x00, // MOV A,#$00 establishes Z while preserving C/V
+        apu.ram[..15].copy_from_slice(&[
+            0xe8, 0x80, // MOV A,#$80 establishes N while preserving C/V
             0x5d, // MOV X,A
-            0x7d, // MOV A,X
-            0xdd, // MOV Y,A
-            0xfd, // MOV A,Y
+            0xe8, 0x00, // MOV A,#$00 establishes Z
+            0x7d, // MOV A,X -> $80
+            0x8d, 0x00, // MOV Y,#$00 establishes Z
+            0xe8, 0x37, // MOV A,#$37, distinct from Y
+            0xdd, // MOV A,Y -> $00
+            0xe8, 0x80, // MOV A,#$80
+            0xfd, // MOV Y,A -> $80
             0x9d, // MOV X,SP
         ]);
 
-        for _ in 0..6 {
+        for expected in [0xc9, 0xc9, 0x4b, 0xc9, 0x4b, 0x49, 0x4b, 0xc9, 0xc9, 0xc9] {
             assert_eq!(apu.step_spc700(), 2);
-            assert_eq!(apu.spc700.psw, 0x4b);
+            assert_eq!(apu.spc700.psw, expected);
         }
+
+        assert_eq!(apu.spc700.a, 0x80);
+        assert_eq!(apu.spc700.y, 0x80);
+        assert_eq!(apu.spc700.x, 0xef);
     }
 
     #[test]

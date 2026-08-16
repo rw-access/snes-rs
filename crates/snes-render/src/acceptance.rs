@@ -11,11 +11,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use snes_core::{Address24, Console, FrameOutput, MappingMode};
+use snes_core::{Address24, Console, FrameOutput, MappingMode, MASTER_TICKS_PER_FRAME};
 
 use crate::{
     headless::{
-        HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus, RomTestDescriptor,
+        run_bounded, HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus,
+        RomTestDescriptor,
     },
     visual::{compare_frame_masked, pixel_within_tolerance, PixelMismatch},
 };
@@ -571,25 +572,44 @@ fn execute_case(
         });
     }
 
-    match (case.max_master_ticks, case.max_frames) {
-        (Some(ticks), _) => console.run_for_master_ticks(ticks),
-        (None, Some(frames)) => console.run_for_frames(frames),
-        (None, None) => {
-            return Err(AcceptanceError::Bound(
-                "case must specify max_master_ticks, max_frames, or capture_frame".to_owned(),
-            ))
+    let result = if case.result_protocol.is_some() {
+        run_result_case(console, case)?
+    } else {
+        match (case.max_master_ticks, case.max_frames) {
+            (Some(ticks), _) => console.run_for_master_ticks(ticks),
+            (None, Some(frames)) => console.run_for_frames(frames),
+            (None, None) => {
+                return Err(AcceptanceError::Bound(
+                    "case must specify max_master_ticks, max_frames, or capture_frame".to_owned(),
+                ))
+            }
         }
-    }
-    let result = case
-        .result_protocol
-        .as_ref()
-        .map(|protocol| protocol.observe(console));
+        None
+    };
     Ok(AcceptanceRun {
         master_ticks: console.master_ticks(),
         stopped: console.is_stopped(),
         result,
         captured_frame: None,
     })
+}
+
+fn run_result_case(
+    console: &mut Console,
+    case: &AcceptanceCase,
+) -> Result<Option<ResultObservation>, AcceptanceError> {
+    let limit = case
+        .max_master_ticks
+        .or_else(|| {
+            case.max_frames
+                .map(|frames| frames.saturating_mul(MASTER_TICKS_PER_FRAME))
+        })
+        .ok_or_else(|| {
+            AcceptanceError::Bound(
+                "result case must specify max_master_ticks or max_frames".to_owned(),
+            )
+        })?;
+    Ok(run_bounded(console, limit, case.result_protocol.as_ref()))
 }
 
 fn write_artifacts(

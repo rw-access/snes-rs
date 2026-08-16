@@ -336,6 +336,9 @@ impl Console {
         if let Some(index) = wram_index(raw, self.wram.len()) {
             return self.wram[index];
         }
+        if let Some(port) = apu_port(raw) {
+            return self.apu.read_cpu_port(port);
+        }
         0
     }
 
@@ -655,6 +658,7 @@ mod tests {
         controller.write_strobe(1);
         let mut dma = Dma::default();
         let mut apu = Apu::default();
+        apu.write_spc_io(0xf4, 0x56);
         let mut cartridge = ProbeCartridge {
             read_value: 0xee,
             writes: Vec::new(),
@@ -677,7 +681,7 @@ mod tests {
         bus.write(Address24::new(0x002140), 0x34);
         // CPU writes feed the SPC700 input latch; the CPU reads the separate
         // SPC700 output latch until the SPC writes a response.
-        assert_eq!(bus.read(Address24::new(0x802140)), 0);
+        assert_eq!(bus.read(Address24::new(0x802140)), 0x56);
         assert_eq!(bus.read(Address24::new(0x004016)), 1);
         assert_eq!(bus.read(Address24::new(0x004017)), 0x1c);
         bus.write(Address24::new(0x004017), 0);
@@ -702,6 +706,14 @@ mod tests {
         assert_eq!(bus.read(Address24::new(0x004302)), 0x78);
         drop(bus);
         assert_eq!(cartridge.writes, vec![(0x40430b, 0x02), (0x404302, 0x99)]);
+    }
+
+    #[test]
+    fn read_memory_exposes_cpu_visible_apu_ports() {
+        let mut console = Console::new(RomImage::new(vec![0xea; 8])).unwrap();
+        console.apu.write_spc_io(0xf4, 0xa5);
+        assert_eq!(console.read_memory(Address24::new(0x002140)), 0xa5);
+        assert_eq!(console.read_memory(Address24::new(0x802140)), 0xa5);
     }
 
     #[test]

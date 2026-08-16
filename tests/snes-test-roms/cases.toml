@@ -254,11 +254,11 @@ rom = "gilyon/spctest.sfc"
 rom_sha256 = "ed6aa8fa247007cdf683f243454d1dff31a25e1977c25fc9d7e1a96e3d031e92"
 mapping = "lorom"
 # gilyon/snes-tests/spctest/spctest.asm documents $2140 as 0=running,
-# 1=all tests passed, and 2=failed. It remains diagnostic until the current
-# SPC700 execution reaches the completion port.
-enabled = false
-diagnostic_only = true
-max_master_ticks = 20000000
+# 1=all tests passed, and 2=failed. The ROM briefly re-enters the IPL after
+# publishing success, so the result runner latches the passing observation.
+enabled = true
+diagnostic_only = false
+max_master_ticks = 5000000
 deterministic_replay = true
 result_protocol = "memory-byte"
 result_address = 0x002140

@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use snes_core::{Address24, Console, LoadError, RomImage};
+use snes_core::{Address24, Console, LoadError, RomImage, MASTER_TICKS_PER_FRAME};
 
 /// A result convention explicitly described by one of the pinned SNES test
 /// sources.  SNES test ROMs do not share the NES/Blargg signature, so result
@@ -136,22 +136,58 @@ impl HeadlessRunner {
 
     pub fn run(&self, console: &mut Console) -> RomRunResult {
         console.reset();
-        if let Some(frames) = self.descriptor.max_frames {
-            console.run_for_frames(frames);
-        } else {
-            let limit = self.descriptor.max_master_ticks.unwrap_or(0);
-            console.run_for_master_ticks(limit);
-        }
+        let limit = self
+            .descriptor
+            .max_frames
+            .map(|frames| frames.saturating_mul(MASTER_TICKS_PER_FRAME))
+            .or(self.descriptor.max_master_ticks)
+            .unwrap_or(0);
+        let result = run_bounded(console, limit, self.descriptor.result_protocol.as_ref());
         RomRunResult {
             master_ticks: console.master_ticks(),
             stopped: console.is_stopped(),
-            result: self
-                .descriptor
-                .result_protocol
-                .as_ref()
-                .map(|protocol| protocol.observe(console)),
+            result: result.or_else(|| {
+                self.descriptor
+                    .result_protocol
+                    .as_ref()
+                    .map(|protocol| protocol.observe(console))
+            }),
         }
     }
+}
+
+/// Runs a bounded console interval and, when supplied, latches the first
+/// passing result observed after an instruction. Result-bearing ROMs may
+/// briefly publish success before returning to an IPL or entering a new test
+/// phase, so reading only the final machine state is insufficient. Non-running
+/// values are left for the final observation because some protocols expose
+/// handshake bytes before their documented failure code.
+pub(crate) fn run_bounded(
+    console: &mut Console,
+    limit: u64,
+    protocol: Option<&ResultProtocol>,
+) -> Option<ResultObservation> {
+    if protocol.is_none() {
+        console.run_for_master_ticks(limit);
+        return None;
+    }
+
+    let start = console.master_ticks();
+    while console.master_ticks().saturating_sub(start) < limit {
+        if console.is_stopped() {
+            break;
+        }
+        let before = console.master_ticks();
+        console.step_instruction();
+        let observation = protocol.unwrap().observe(console);
+        if matches!(observation.status, ResultStatus::Passed) {
+            return Some(observation);
+        }
+        if console.master_ticks() == before {
+            break;
+        }
+    }
+    protocol.map(|protocol| protocol.observe(console))
 }
 
 #[cfg(test)]

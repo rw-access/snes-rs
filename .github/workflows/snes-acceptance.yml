@@ -1,0 +1,48 @@
+name: SNES acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/snes-acceptance.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "scripts/**"
+      - "tests/snes-test-roms/cases.toml"
+      - "tests/snes-test-roms/smoke.json"
+      - "tests/snes-test-roms/sources.json"
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out emulator
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch pinned test corpus
+        run: python3 scripts/fetch_snes_test_roms.py
+
+      - name: Run strict acceptance cases
+        env:
+          SNES_RUN_ACCEPTANCE: "1"
+        run: cargo test -p snes-render --test acceptance -- --nocapture
+
+      - name: Verify corpus capability inventory
+        run: |
+          cargo build -p snes-render --bin snes-test
+          python3 scripts/run_snes_corpus_smoke.py \
+            --report target/snes-corpus-smoke.json
+
+      - name: Run semantic 65816 conformance
+        run: |
+          cargo build -p snes-render --bin snes-65816-conformance
+          target/debug/snes-65816-conformance \
+            tests/snes-test-roms/materialized/singlesteptests-65816/v1 \
+            --limit 50800 --fail-fast

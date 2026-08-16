@@ -53,8 +53,8 @@ The corpus gates are intentionally layered:
 4. `cargo test --workspace` proves only the checked-in unit and boundary tests.
    It deliberately says nothing about the optional corpus.
 5. An external-ROM gate may be called a pass only when it reports the named
-   oracle for every selected case. The current `snes-test` binary reports only
-   bounded ticks and `stopped`; it is not that gate.
+   oracle for every selected case. The `snes-test` binary without a result
+   protocol reports only bounded ticks and `stopped`; it is not that gate.
 
 The current execution limit is instruction/DMA-granular rather than a hard
 cutoff: a request for `N` master ticks may report a value greater than `N` after
@@ -65,7 +65,10 @@ enforce an explicit memory-byte result when one is documented. The opt-in
 `snes-acceptance` binary provides nonzero results for strict case failures. The
 `RomTestDescriptor::mapping` field and acceptance `mapping` descriptor are
 applied when loading a ROM; leaving them unset preserves automatic file-header
-detection.
+detection. Result-bearing runs observe the protocol after each instruction and
+latch a passing value, so a ROM may safely return to an IPL or begin another
+phase after publishing success. The CPU-visible `$2140-$2143` APU output ports
+are exposed through the same memory reader used by result protocols.
 
 ## Visual acceptance contract
 
@@ -99,7 +102,9 @@ ARGB32, PNG, and JPEG references, with reference dimensions checked before
 comparison and supplied reference SHA-256 values checked before decoding. PNG
 chunk checksums are also verified by the PNG decoder. Ten pinned PeterLemon PPU
 captures are currently enabled strict golden gates: they match exactly at their
-declared frames with zero tolerance and empty masks. Decoder support alone is
+declared frames with zero tolerance and empty masks. The pinned gilyon SPC700
+ROM is also enabled as a strict result-protocol gate; it reports `$2140 = 1`
+after its documented instruction suite. Decoder support alone is
 not a valid oracle; every enabled case still needs a matching expected capture
 and a documented comparison contract.
 
@@ -165,7 +170,8 @@ visual-acceptance pass:
   granularity are covered by focused register tests;
 - console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
   selected H/V timer register and IRQ paths;
-- APU port/DSP-register state and an initial SPC700 execution subset, including
+- APU port/DSP-register state and the gilyon SPC700 instruction-suite gate,
+  including
   the `$F0-$FF` I/O overlay, DSP address/data access, timer dividers and
   read-clear outputs, IPL entry state, BRR decoding, bounded eight-voice
   mixing, console audio output, and selected word arithmetic with full-word
@@ -177,8 +183,8 @@ scanline timing, complete H/V timer and
 HDMA behavior, full PPU mode/priority/window and Mode 7 edge behavior,
 exact DSP envelope/interpolation/noise/echo behavior,
 enhancement-chip cartridges,
-automatic CI execution of the JSON-vector gate, and pinned ROM expected-result
-oracles plus broader visual golden coverage.
+automatic CI execution of the JSON-vector gate, and additional pinned ROM
+expected-result oracles plus broader visual golden coverage.
 The
 acceptance harness now has per-ROM descriptors, ROM/reference provenance,
 bounded execution, frame capture, deterministic replay, and diff artifacts;
