@@ -84,7 +84,7 @@ fn classify(address: Address24, value: u8, running: u8, passed: u8) -> ResultObs
     }
 }
 
-/// Per-ROM execution settings reserved for the test runner.
+/// Per-ROM execution settings for the test runner.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RomTestDescriptor {
     pub mapping: Option<snes_core::MappingMode>,
@@ -117,13 +117,21 @@ impl HeadlessRunner {
 
     /// Loads a ROM image from bytes.
     pub fn load_bytes(&self, bytes: Vec<u8>) -> Result<Console, LoadError> {
-        Console::new(RomImage::new(bytes))
+        self.load_image(RomImage::new(bytes))
     }
 
     /// Loads a ROM image from a file.
     pub fn load_path(&self, path: &Path) -> Result<Console, LoadError> {
         let bytes = fs::read(path).map_err(|_| LoadError::UnsupportedFormat)?;
-        Console::new(RomImage::load(bytes)?)
+        self.load_image(RomImage::load(bytes)?)
+    }
+
+    fn load_image(&self, image: RomImage) -> Result<Console, LoadError> {
+        let image = match self.descriptor.mapping {
+            Some(mapping) => image.with_mapping_override(mapping),
+            None => image,
+        };
+        Console::new(image)
     }
 
     pub fn run(&self, console: &mut Console) -> RomRunResult {

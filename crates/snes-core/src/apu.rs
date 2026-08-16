@@ -952,7 +952,11 @@ impl Spc700 {
                 if take {
                     self.pc = self.pc.wrapping_add_signed(i16::from(offset));
                 }
-                2
+                if take {
+                    4
+                } else {
+                    2
+                }
             }
             0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xb0 => {
                 let offset = self.fetch(ram) as i8;
@@ -968,7 +972,11 @@ impl Spc700 {
                 if take {
                     self.pc = self.pc.wrapping_add_signed(i16::from(offset));
                 }
-                2
+                if take {
+                    4
+                } else {
+                    2
+                }
             }
             0x5f => {
                 let lo = self.fetch(ram);
@@ -1988,6 +1996,8 @@ mod tests {
             (0x70, 0x40), // BVS
             (0x90, 0x00), // BCC
             (0xb0, 0x01), // BCS
+            (0xd0, 0x00), // BNE
+            (0xf0, 0x02), // BEQ
         ];
 
         for (opcode, psw) in cases {
@@ -1995,12 +2005,18 @@ mod tests {
             apu.spc700.pc = 0x0100;
             apu.spc700.psw = psw;
             apu.ram[0x0100..0x0102].copy_from_slice(&[opcode, 0x02]);
-            assert_eq!(apu.step_spc700(), 2);
+            assert_eq!(apu.step_spc700(), 4, "taken opcode {opcode:02x}");
             assert_eq!(apu.spc700.pc, 0x0104, "opcode {opcode:02x}");
         }
 
         let mut apu = Apu::default();
         apu.ram[..2].copy_from_slice(&[0xb0, 0x02]);
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.spc700.pc, 0x0002);
+
+        let mut apu = Apu::default();
+        apu.spc700.psw = 0x02;
+        apu.ram[..2].copy_from_slice(&[0xd0, 0x02]);
         assert_eq!(apu.step_spc700(), 2);
         assert_eq!(apu.spc700.pc, 0x0002);
     }

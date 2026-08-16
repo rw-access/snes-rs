@@ -99,6 +99,16 @@ impl RomImage {
         Ok(image)
     }
 
+    /// Overrides the mapping family selected for this image.
+    ///
+    /// The image bytes and all other loaded metadata remain unchanged. This
+    /// is intended for callers such as test harnesses that have authoritative
+    /// mapping information when a ROM header is absent or unreliable.
+    pub fn with_mapping_override(mut self, mapping: MappingMode) -> Self {
+        self.metadata.mapping = mapping;
+        self
+    }
+
     /// Returns the image bytes as provided by the caller.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
@@ -264,6 +274,23 @@ mod tests {
         assert_eq!(image.metadata().mapping, MappingMode::HiRom);
         let mut cartridge = RomOnlyCartridge::new(image);
         assert_eq!(cartridge.read(Address24::new(0xc00000)), 0x42);
+    }
+
+    #[test]
+    fn mapping_override_replaces_detected_mapping_without_changing_image() {
+        let mut rom = vec![0; 0x10000];
+        rom[0xffc0..0xffd5].fill(b' ');
+        rom[0xffd5] = 0x21;
+        rom[0xffd7] = 0x09;
+        let image = RomImage::load(rom).unwrap();
+        let identity = image.identity();
+
+        let overridden = image.with_mapping_override(MappingMode::LoRom);
+
+        assert_eq!(overridden.metadata().mapping, MappingMode::LoRom);
+        assert_eq!(overridden.metadata().header_offset, Some(0xffc0));
+        assert_eq!(overridden.identity(), identity);
+        assert_eq!(overridden.as_bytes().len(), 0x10000);
     }
 
     #[test]

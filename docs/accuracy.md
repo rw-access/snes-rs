@@ -29,7 +29,7 @@ accepted according to their role:
 | Corpus material | Acceptance role | Required evidence | Current status |
 | --- | --- | --- | --- |
 | `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Optional runner passes all 50,800 selected vectors; bus-cycle records are parsed but intentionally not compared. |
-| `peterlemon-snes/CPUTest/CPU/*.sfc` with its sibling `.png` | CPU/PPU integration | Run the matching ROM to its documented result, capture a declared frame, and compare the matching lossless reference. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; the pinned PNG examples remain diagnostic until their cases have valid enabled oracles. |
+| `peterlemon-snes/CPUTest/CPU/*.sfc`, `PPU/**/*.sfc`, and `SPC700/**/*.sfc` with available fixtures | CPU/PPU/APU integration | Run the matching ROM to its documented result, capture a declared frame or audio result, and compare the matching lossless reference where an oracle is defined. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; the materialized PPU PNG cases are currently diagnostic while tile-edge differences are resolved. |
 | Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | The harness supports an explicit `memory-byte` protocol; only documented cases may use it. Other cases remain diagnostic. |
 | `.spc`, `.bin`, source files, and standalone image/audio fixtures | Subsystem fixture | Consume them only through the subsystem-specific harness that defines their format and oracle. | Must not be passed to the SNES boot-ROM runner as a suite. |
 
@@ -56,8 +56,8 @@ the final instruction or transfer. An acceptance descriptor records the bound,
 but a strict timing gate must still define the allowed overshoot. The legacy
 `snes-test` CLI prints bounded diagnostic output only; the opt-in
 `snes-acceptance` binary provides nonzero results for strict case failures. The
-`RomTestDescriptor::mapping` field is also not evidence of an override until
-the runner actually applies it when loading a ROM.
+`RomTestDescriptor::mapping` field is applied by the headless runner when
+loading a ROM; leaving it unset preserves automatic file-header detection.
 
 ## Visual acceptance contract
 

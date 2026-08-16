@@ -45,3 +45,26 @@ height = 224
 channel_tolerance = 0
 mask = ""
 artifact = "higan-hblank-dma"
+
+[case.peterlemon-ppu-bgmap-2bpp]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.sfc"
+rom_sha256 = "66083b119131d4cd7b3c41301750342152d2c3a3cfce103de074a0ae53330146"
+# The scene is currently a useful visual diagnostic, but exact comparison
+# remains disabled until the renderer's remaining tile-edge differences are
+# resolved.
+enabled = false
+diagnostic_only = true
+max_frames = 10
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 10
+reference = "PPU/BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.png"
+reference_sha256 = "bb6a13abb6303cccc6e2106765bc89b9960761a1afec31207da5c5551552a8cb"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-bgmap-2bpp"

@@ -16,9 +16,9 @@
       "name": "PeterLemon SNES CPU tests",
       "repository": "https://github.com/PeterLemon/SNES.git",
       "revision": "350b394e86ec5d62f600b5cbf64cdce3721bb6ef",
-      "paths": ["README.md", "CPUTest/CPU"],
-      "include_extensions": [".sfc", ".png"],
-      "purpose": "Compiled 65816/SNES CPU test ROMs and their expected display captures."
+      "paths": ["README.md", "CPUTest/CPU", "PPU", "SPC700"],
+      "include_extensions": [".sfc", ".spc", ".png"],
+      "purpose": "Compiled 65816 CPU, PPU, and SPC700 test ROMs with expected display captures and audio fixtures."
     },
     {
       "id": "higan-snes-test-roms",

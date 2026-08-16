@@ -1,3 +1,4 @@
+use snes_core::MappingMode;
 use snes_render::{HeadlessRunner, RomTestDescriptor};
 
 #[test]
@@ -35,4 +36,24 @@ fn headless_runner_honors_frame_bounds() {
     let result = runner.run(&mut console);
     assert!(result.master_ticks > 0);
     assert!(!result.stopped);
+}
+
+#[test]
+fn headless_runner_applies_explicit_mapping_to_raw_bytes() {
+    let mut rom = vec![0; 0x10000];
+    // A headerless HiROM image uses the linear address at $00:FFFC for its
+    // reset vector and maps $00:8000 to the byte at ROM offset $8000.
+    rom[0xfffc] = 0x00;
+    rom[0xfffd] = 0x80;
+    rom[0x8000] = 0xdb; // STP
+    let runner = HeadlessRunner::new(RomTestDescriptor {
+        mapping: Some(MappingMode::HiRom),
+        max_master_ticks: Some(100),
+        ..RomTestDescriptor::default()
+    });
+
+    let mut console = runner.load_bytes(rom).unwrap();
+    let result = runner.run(&mut console);
+
+    assert!(result.stopped);
 }

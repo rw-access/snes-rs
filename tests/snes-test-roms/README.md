@@ -12,7 +12,8 @@ access the network.
 - `SingleStepTests/65816` at
   `db6b10401729d5f20f2181dde5d3d7b037093a4a`: 65816 JSON vectors.
 - `PeterLemon/SNES` at
-  `350b394e86ec5d62f600b5cbf64cdce3721bb6ef`: compiled CPU test ROMs.
+  `350b394e86ec5d62f600b5cbf64cdce3721bb6ef`: compiled CPU, PPU, and SPC700
+  test ROMs, expected display captures, and audio fixtures.
 - `higan/snes-test-roms` at
   `26e8aa91e0d3b90b901e7e693bc4a8244b391d7b`: selected hardware-test ROMs,
   audio fixtures, documentation, and image captures.
@@ -120,7 +121,7 @@ one file-count or exit-status check:
 | Material | Correct oracle |
 | --- | --- |
 | SingleStepTests `v1/*.json` | Initial/final CPU state, memory, and the applicable bus-access sequence. |
-| PeterLemon CPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. |
+| PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. The newly materialized PPU cases remain diagnostic while tile-edge differences are resolved. |
 | higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`). |
 
 The corpus also contains `.spc`, `.bin`, source, and standalone image files.
@@ -154,8 +155,9 @@ engine's timing/access model is intentionally not cycle-accurate. It is
 therefore an opt-in semantic conformance harness, not yet a full-corpus pass;
 unsupported bootstrap or CPU behavior exits nonzero. The limit is instruction/DMA-
 granular, so the reported tick count may exceed the requested bound and is
-reported as evidence, not as a cycle-accuracy result. The runner's mapping
-descriptor is not yet an applied mapping override.
+reported as evidence, not as a cycle-accuracy result. The runner applies an
+explicit mapping descriptor override when loading a ROM; an unset descriptor
+continues to use automatic file-header detection.
 
 ## Visual case record
 
