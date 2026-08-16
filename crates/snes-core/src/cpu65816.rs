@@ -266,6 +266,59 @@ impl Cpu65816 {
                 self.state.program_bank = bank;
                 cycles = 8;
             }
+            0x44 | 0x54 => {
+                let source_bank = self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let destination_bank = self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let count = u32::from(self.state.a).wrapping_add(1);
+                for _ in 0..count {
+                    let source = Address24::new(
+                        (u32::from(source_bank) << 16) | u32::from(self.state.x),
+                    );
+                    let destination = Address24::new(
+                        (u32::from(destination_bank) << 16) | u32::from(self.state.y),
+                    );
+                    let value = self.read(
+                        bus,
+                        source,
+                        BusAccessKind::DataRead,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.write_value(
+                        bus,
+                        destination,
+                        u16::from(value),
+                        true,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    if opcode == 0x54 {
+                        self.state.x = self.state.x.wrapping_add(1);
+                        self.state.y = self.state.y.wrapping_add(1);
+                    } else {
+                        self.state.x = self.state.x.wrapping_sub(1);
+                        self.state.y = self.state.y.wrapping_sub(1);
+                    }
+                }
+                self.state.a = 0xffff;
+                self.state.data_bank = destination_bank;
+                cycles = 7;
+            }
             0x40 => {
                 self.state.status = self.pop_byte(
                     bus,
@@ -402,6 +455,62 @@ impl Cpu65816 {
                 }
                 cycles = if long { 5 } else if addressing == 0x0d { 4 } else { 3 };
             }
+            0x15 | 0x35 | 0x55 | 0x75 | 0xd5 | 0xf5 | 0x1d | 0x3d | 0x5d | 0x7d | 0xdd
+            | 0xfd | 0x19 | 0x39 | 0x59 | 0x79 | 0xd9 | 0xf9 | 0x1f | 0x3f | 0x5f | 0x7f
+            | 0xdf | 0xff => {
+                let address = match opcode & 0x1f {
+                    0x15 => self.direct_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x19 => self.absolute_indexed_address(
+                        bus,
+                        self.state.y,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x1f => self.long_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    _ => self.absolute_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                match opcode & 0xe0 {
+                    0x00 => self.logic_acc(value, |lhs, rhs| lhs | rhs),
+                    0x20 => self.logic_acc(value, |lhs, rhs| lhs & rhs),
+                    0x40 => self.logic_acc(value, |lhs, rhs| lhs ^ rhs),
+                    0x60 => self.adc(value),
+                    0xc0 => self.compare(self.state.a, value, self.accumulator_is_8_bit()),
+                    _ => self.sbc(value),
+                }
+                cycles = if opcode & 0x1f == 0x1f { 5 } else { 4 };
+            }
             0xc0 | 0xc9 | 0xe0 => {
                 let width = if opcode == 0xe0 {
                     self.index_is_8_bit()
@@ -425,6 +534,143 @@ impl Cpu65816 {
                 };
                 self.compare(lhs, value, width);
                 cycles = 2 + u32::from(!width);
+            }
+            0x89 => {
+                let value = self.fetch_value(
+                    bus,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.status = (self.state.status & !FLAG_ZERO)
+                    | if self.state.a & value == 0 { FLAG_ZERO } else { 0 };
+                cycles = 2;
+            }
+            0x24 | 0x2c | 0x34 | 0x3c => {
+                let address = if opcode == 0x24 || opcode == 0x34 {
+                    if opcode == 0x34 {
+                        self.direct_indexed_address(
+                            bus,
+                            self.state.x,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    } else {
+                        self.direct_address(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    }
+                } else if opcode == 0x3c {
+                    self.absolute_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.status = (self.state.status & !(FLAG_ZERO | FLAG_OVERFLOW | FLAG_NEGATIVE))
+                    | if self.state.a & value == 0 { FLAG_ZERO } else { 0 }
+                    | if value & if self.accumulator_is_8_bit() { 0x40 } else { 0x4000 } != 0 {
+                        FLAG_OVERFLOW
+                    } else {
+                        0
+                    }
+                    | if value & if self.accumulator_is_8_bit() { 0x80 } else { 0x8000 } != 0 {
+                        FLAG_NEGATIVE
+                    } else {
+                        0
+                    };
+                cycles = 4;
+            }
+            0x04 | 0x0c | 0x14 | 0x1c => {
+                let address = if opcode == 0x04 || opcode == 0x14 {
+                    if opcode == 0x14 {
+                        self.direct_indexed_address(
+                            bus,
+                            self.state.x,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    } else {
+                        self.direct_address(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    }
+                } else if opcode == 0x1c {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.set_zero_negative(self.state.a & value, self.accumulator_is_8_bit());
+                let result = if opcode == 0x04 || opcode == 0x0c {
+                    value | self.state.a
+                } else {
+                    value & !self.state.a
+                };
+                self.write_value(
+                    bus,
+                    address,
+                    result,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                cycles = 5;
             }
             0x10 | 0x30 | 0x50 | 0x70 | 0x80 | 0x90 | 0xb0 | 0xd0 | 0xf0 => {
                 let offset = self.fetch_byte(
@@ -561,6 +807,129 @@ impl Cpu65816 {
                 }
                 self.set_zero_negative(value, self.index_is_8_bit());
                 cycles = 3;
+            }
+            0xa1 | 0xb1 | 0xb5 | 0xb9 | 0xbd | 0xbf | 0x81 | 0x91 | 0x95 | 0x99 | 0x9d
+            | 0x9f => {
+                let is_load = opcode & 0x80 == 0x80 && opcode & 0x20 != 0;
+                let address = match opcode & 0x1f {
+                    0x01 => self.direct_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x11 => self.absolute_indexed_address(
+                        bus,
+                        self.state.y,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x1f => self.long_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x15 => self.direct_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    _ => self.absolute_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                };
+                if is_load {
+                    let value = self.read_value(
+                        bus,
+                        address,
+                        self.accumulator_is_8_bit(),
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.set_accumulator(value);
+                    self.set_zero_negative(value, self.accumulator_is_8_bit());
+                } else {
+                    self.write_value(
+                        bus,
+                        address,
+                        self.state.a,
+                        self.accumulator_is_8_bit(),
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                }
+                cycles = if opcode & 0x1f == 0x1f { 5 } else { 4 };
+            }
+            0xb4 | 0xb6 | 0xbc | 0xbe | 0x94 | 0x96 | 0x9e => {
+                let index_is_x = matches!(opcode, 0xb4 | 0xbc | 0x94 | 0x9e);
+                let index = if index_is_x { self.state.x } else { self.state.y };
+                let address = if opcode == 0xbc || opcode == 0xbe || opcode == 0x9e {
+                    self.absolute_indexed_address(
+                        bus,
+                        index,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.direct_indexed_address(
+                        bus,
+                        index,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let load = matches!(opcode, 0xb4 | 0xb6 | 0xbc | 0xbe);
+                if load {
+                    let value = self.read_value(
+                        bus,
+                        address,
+                        self.index_is_8_bit(),
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    if matches!(opcode, 0xb4 | 0xbc) {
+                        self.state.y = self.set_index_width(value);
+                    } else {
+                        self.state.x = self.set_index_width(value);
+                    }
+                    self.set_zero_negative(value, self.index_is_8_bit());
+                } else {
+                    let value = if opcode == 0x94 { self.state.y } else if opcode == 0x96 { self.state.x } else { 0 };
+                    self.write_value(
+                        bus,
+                        address,
+                        value,
+                        if opcode == 0x9e { self.accumulator_is_8_bit() } else { self.index_is_8_bit() },
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                }
+                cycles = 4;
             }
             0x8c | 0x8e | 0xac | 0xae | 0xad => {
                 let address = self.absolute_address(
@@ -772,6 +1141,135 @@ impl Cpu65816 {
                 self.set_accumulator(value);
                 self.set_zero_negative(value, self.accumulator_is_8_bit());
                 cycles = 2;
+            }
+            0x0a | 0x2a | 0x4a | 0x6a => {
+                let value = self.shift_value(self.state.a, opcode, self.accumulator_is_8_bit());
+                self.set_accumulator(value);
+                cycles = 2;
+            }
+            0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x36 | 0x3e | 0x46 | 0x4e
+            | 0x56 | 0x5e | 0x66 | 0x6e | 0x76 | 0x7e => {
+                let address = if opcode & 0x0f == 0x06 {
+                    if opcode & 0x10 != 0 {
+                        self.direct_indexed_address(
+                            bus,
+                            self.state.x,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    } else {
+                        self.direct_address(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    }
+                } else if opcode & 0x10 != 0 {
+                    self.absolute_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let result = self.shift_value(value, opcode, self.accumulator_is_8_bit());
+                self.write_value(
+                    bus,
+                    address,
+                    result,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                cycles = 6;
+            }
+            0xc6 | 0xce | 0xd6 | 0xde | 0xe6 | 0xee | 0xf6 | 0xfe => {
+                let address = if opcode & 0x0f == 0x06 {
+                    if opcode & 0x10 != 0 {
+                        self.direct_indexed_address(
+                            bus,
+                            self.state.x,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    } else {
+                        self.direct_address(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        )
+                    }
+                } else if opcode & 0x10 != 0 {
+                    self.absolute_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let result = if opcode & 0x20 != 0 {
+                    value.wrapping_add(1)
+                } else {
+                    value.wrapping_sub(1)
+                } & if self.accumulator_is_8_bit() { 0x00ff } else { 0xffff };
+                self.set_zero_negative(result, self.accumulator_is_8_bit());
+                self.write_value(
+                    bus,
+                    address,
+                    result,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                cycles = 6;
             }
             0xa0 | 0xa2 => {
                 let value = self.fetch_value(
@@ -1071,6 +1569,23 @@ impl Cpu65816 {
         self.set_zero_negative(result, mask == 0x00ff);
     }
 
+    fn shift_value(&mut self, value: u16, opcode: u8, eight_bit: bool) -> u16 {
+        let mask = if eight_bit { 0x00ff } else { 0xffff };
+        let sign = if eight_bit { 0x0080 } else { 0x8000 };
+        let value = value & mask;
+        let carry_in = u16::from(self.state.status & FLAG_CARRY != 0);
+        let (result, carry) = match opcode & 0x60 {
+            0x00 => (value << 1 & mask, value & sign != 0),
+            0x20 => ((value << 1 | carry_in) & mask, value & sign != 0),
+            0x40 => (value >> 1, value & 1 != 0),
+            _ => (value >> 1 | (carry_in * sign), value & 1 != 0),
+        };
+        self.state.status = (self.state.status & !FLAG_CARRY)
+            | if carry { FLAG_CARRY } else { 0 };
+        self.set_zero_negative(result, eight_bit);
+        result
+    }
+
     fn compare(&mut self, lhs: u16, rhs: u16, eight_bit: bool) {
         let mask = if eight_bit { 0x00ff } else { 0xffff };
         let left = lhs & mask;
@@ -1106,6 +1621,53 @@ impl Cpu65816 {
     ) -> Address24 {
         let offset = self.fetch_word(bus, trace, cycles, ticks, count);
         Address24::new((u32::from(self.state.data_bank) << 16) | u32::from(offset))
+    }
+
+    fn direct_indexed_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        index: u16,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        Address24::new(u32::from(
+            self.state
+                .direct_page
+                .wrapping_add(u16::from(offset))
+                .wrapping_add(index),
+        ))
+    }
+
+    fn absolute_indexed_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        index: u16,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_word(bus, trace, cycles, ticks, count);
+        Address24::new(
+            (u32::from(self.state.data_bank) << 16)
+                | u32::from(offset.wrapping_add(index)),
+        )
+    }
+
+    fn long_indexed_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        index: u16,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let address = self.long_address(bus, trace, cycles, ticks, count);
+        Address24::new(address.get().wrapping_add(u32::from(index)))
     }
 
     fn long_address(
@@ -1545,5 +2107,55 @@ mod tests {
         assert_eq!(cpu.state().a & 0xff, 0x21);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().a & 0xff, 0x43);
+    }
+
+    #[test]
+    fn indexed_load_and_store_families_add_register_offsets() {
+        let mut bus = FlatBus::new();
+        bus.memory[..12].copy_from_slice(&[
+            0xa2, 0x01, 0xb5, 0x10, 0xbd, 0x34, 0x12, 0x9d, 0x40, 0x12, 0xea, 0xea,
+        ]);
+        bus.memory[0x11] = 0x2a;
+        bus.memory[0x1235] = 0x3c;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x2a);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x3c);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(bus.memory[0x1241], 0x3c);
+    }
+
+    #[test]
+    fn shifts_rotate_through_carry_and_memory_inc_dec_set_flags() {
+        let mut bus = FlatBus::new();
+        bus.memory[..10].copy_from_slice(&[
+            0x18, 0xa9, 0x81, 0x0a, 0x4a, 0x2a, 0x06, 0x10, 0xc6, 0x10,
+        ]);
+        bus.memory[0x10] = 4;
+        let mut cpu = Cpu65816::default();
+        for _ in 0..7 {
+            cpu.step_with_bus(&mut bus, None);
+        }
+        assert_eq!(bus.memory[0x10], 7);
+        assert_eq!(cpu.state().a & 0xff, 0x02);
+    }
+
+    #[test]
+    fn mvn_copies_a_plus_one_bytes_and_updates_banks() {
+        let mut bus = FlatBus::new();
+        bus.memory[..3].copy_from_slice(&[0x54, 0x00, 0x02]);
+        bus.memory[0x0100] = 0xaa;
+        bus.memory[0x0101] = 0xbb;
+        let mut cpu = Cpu65816::default();
+        cpu.state.a = 1;
+        cpu.state.x = 0x0100;
+        cpu.state.y = 0x0200;
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(&bus.memory[0x020200..0x020202], &[0xaa, 0xbb]);
+        assert_eq!(cpu.state().a, 0xffff);
+        assert_eq!(cpu.state().x, 0x0102);
+        assert_eq!(cpu.state().data_bank, 2);
     }
 }
