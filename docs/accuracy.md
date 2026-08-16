@@ -28,9 +28,9 @@ accepted according to their role:
 
 | Corpus material | Acceptance role | Required evidence | Current status |
 | --- | --- | --- | --- |
-| `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Not wired into a repository test yet. |
+| `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Optional runner passes all 50,800 selected vectors; bus-cycle records are parsed but intentionally not compared. |
 | `peterlemon-snes/CPUTest/CPU/*.sfc` with its sibling `.png` | CPU/PPU integration | Run the matching ROM to its documented result, capture a declared frame, and compare the matching lossless reference. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; the pinned PNG examples remain diagnostic until their cases have valid enabled oracles. |
-| Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | No generic pass rule exists; bounded execution is diagnostic only. |
+| Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | The harness supports an explicit `memory-byte` protocol; only documented cases may use it. Other cases remain diagnostic. |
 | `.spc`, `.bin`, source files, and standalone image/audio fixtures | Subsystem fixture | Consume them only through the subsystem-specific harness that defines their format and oracle. | Must not be passed to the SNES boot-ROM runner as a suite. |
 
 This prevents a successful file load, a non-crashing bounded run, or an early
@@ -128,10 +128,9 @@ state observation but not arbitrary register injection: it loads the vector
 state through real instructions, restores bootstrap memory, then measures the
 target instruction. It is not included in the measured result. Bus-cycle tags
 are parsed and counted for diagnostics, but are not compared: this emulator's
-timing/access model is intentionally not cycle-accurate. The runner therefore
-does not claim full SingleStepTests coverage, interrupt/vector timing coverage,
-or a passing corpus until all vectors are selected and pass with cycle checks
-implemented separately.
+timing/access model is intentionally not cycle-accurate. The 50,800-vector
+result is therefore semantic conformance evidence, not cycle-accuracy
+evidence.
 
 ## Current implementation boundary
 
@@ -152,6 +151,8 @@ visual-acceptance pass:
   affine Mode 7 path, subscreen/fixed-color math, color-window cases, bounded
   frame execution, packed 2/4/8bpp tile decoding, Modes 4–6, direct-color
   paths, DMA/HDMA VRAM word-port patterns, and tolerant frame comparison;
+- PPU `$2133` SETINI masking/write-only behavior and high-resolution scroll
+  granularity are covered by focused register tests;
 - console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
   selected H/V timer register and IRQ paths;
 - APU port/DSP-register state and an initial SPC700 execution subset, including
@@ -161,12 +162,13 @@ visual-acceptance pass:
   zero/negative flags for word load/increment/decrement operations and DIV
   overflow/zero-divisor edge cases.
 
-Remaining before claiming broad emulator compatibility: complete 65816 and
-SPC700 opcode coverage, cycle-accurate scanline timing, complete H/V timer and
+Remaining before claiming broad emulator compatibility: cycle-accurate
+scanline timing, complete H/V timer and
 HDMA behavior, full PPU mode/priority/window and Mode 7 edge behavior,
 scanline sprite limits, exact DSP envelope/interpolation/noise/echo behavior,
 enhancement-chip cartridges,
-JSON-vector execution, and pinned ROM expected-result plus visual golden runs.
+automatic CI execution of the JSON-vector gate, and pinned ROM expected-result
+plus visual golden runs.
 The
 acceptance harness now has per-ROM descriptors, ROM/reference provenance,
 bounded execution, frame capture, deterministic replay, and diff artifacts;
