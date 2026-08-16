@@ -2,6 +2,8 @@
 Cargo.lock
 
 # Local ROMs and generated test artifacts.
+/artifacts/
+/roms/
 *.sfc
 *.smc
 *.rom
