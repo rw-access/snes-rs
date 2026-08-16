@@ -8,7 +8,8 @@ fn headless_boundary_accepts_an_image() {
 
 #[test]
 fn headless_runner_executes_until_a_bounded_stop() {
-    let mut rom = vec![0; 0x8000];
+    let mut rom = vec![0xea; 0x8000];
+    rom[0] = 0xdb;
     rom[0x7ffc] = 0x00;
     rom[0x7ffd] = 0x80;
     let runner = HeadlessRunner::new(RomTestDescriptor {

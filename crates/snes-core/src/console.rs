@@ -46,6 +46,10 @@ impl Console {
     /// Resets the machine state.
     pub fn reset(&mut self) {
         self.cpu.reset();
+        self.ppu = Ppu::default();
+        self.dma = Dma::default();
+        self.controller = ControllerState::default();
+        self.timing = TimingState::default();
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
@@ -230,9 +234,14 @@ mod tests {
 
     #[test]
     fn traced_and_untraced_steps_have_same_summary() {
-        let rom = RomImage::new(vec![0; 8]);
+        let mut bytes = vec![0xea; 0x8000];
+        bytes[0x7ffc] = 0x00;
+        bytes[0x7ffd] = 0x80;
+        let rom = RomImage::new(bytes);
         let mut plain = Console::new(rom.clone()).unwrap();
         let mut traced = Console::new(rom).unwrap();
+        plain.reset();
+        traced.reset();
         let plain_step = plain.step_instruction();
         let mut trace = VecTrace::default();
         let traced_step = traced.step_instruction_traced(&mut trace);

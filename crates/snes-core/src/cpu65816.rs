@@ -113,7 +113,7 @@ impl Cpu65816 {
         let mut cycles = 0;
         let mut master_ticks = 0;
         let mut access_count = 0;
-        let opcode = self.fetch_byte(
+        let opcode = self.fetch_opcode(
             bus,
             &mut trace,
             &mut cycles,
@@ -124,7 +124,43 @@ impl Cpu65816 {
 
         match opcode {
             0x00 => {
-                self.state.stopped = true;
+                self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.push_word(
+                    bus,
+                    self.state.pc,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.push_status(bus, &mut trace, &mut master_ticks, &mut access_count);
+                self.state.status |= FLAG_IRQ_DISABLE;
+                self.state.status &= !0x08;
+                self.state.program_bank = 0;
+                let lo = self.read(
+                    bus,
+                    Address24::new(0x00fffe),
+                    BusAccessKind::VectorFetch,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let hi = self.read(
+                    bus,
+                    Address24::new(0x00ffff),
+                    BusAccessKind::VectorFetch,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = u16::from_le_bytes([lo, hi]);
                 cycles = 7;
             }
             0x18 => {
@@ -172,7 +208,135 @@ impl Cpu65816 {
                 self.state.program_bank = bank;
                 cycles = 4;
             }
-            0x69 | 0xe9 => {
+            0x20 => {
+                let target = self.fetch_word(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.push_word(
+                    bus,
+                    self.state.pc.wrapping_sub(1),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = target;
+                cycles = 6;
+            }
+            0x22 => {
+                let low = self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let high = self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let bank = self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.push_byte(
+                    bus,
+                    self.state.program_bank,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.push_word(
+                    bus,
+                    self.state.pc.wrapping_sub(1),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = u16::from_le_bytes([low, high]);
+                self.state.program_bank = bank;
+                cycles = 8;
+            }
+            0x40 => {
+                self.state.status = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let lo = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let hi = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = u16::from_le_bytes([lo, hi]);
+                if !self.state.emulation_mode {
+                    self.state.program_bank = self.pop_byte(
+                        bus,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                }
+                self.normalize_widths();
+                cycles = 6;
+            }
+            0x60 => {
+                let lo = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let hi = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = u16::from_le_bytes([lo, hi]).wrapping_add(1);
+                cycles = 6;
+            }
+            0x6b => {
+                let lo = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let hi = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let bank = self.pop_byte(
+                    bus,
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = u16::from_le_bytes([lo, hi]).wrapping_add(1);
+                self.state.program_bank = bank;
+                cycles = 6;
+            }
+            0x09 | 0x29 | 0x49 | 0x69 | 0xe9 => {
                 let value = self.fetch_value(
                     bus,
                     self.accumulator_is_8_bit(),
@@ -181,14 +345,40 @@ impl Cpu65816 {
                     &mut master_ticks,
                     &mut access_count,
                 );
-                if opcode == 0x69 {
-                    self.adc(value);
-                } else {
-                    self.sbc(value);
+                match opcode {
+                    0x09 => self.logic_acc(value, |lhs, rhs| lhs | rhs),
+                    0x29 => self.logic_acc(value, |lhs, rhs| lhs & rhs),
+                    0x49 => self.logic_acc(value, |lhs, rhs| lhs ^ rhs),
+                    0x69 => self.adc(value),
+                    _ => self.sbc(value),
                 }
                 cycles = 2 + u32::from(!self.accumulator_is_8_bit());
             }
-            0x80 => {
+            0xc0 | 0xc9 | 0xe0 => {
+                let width = if opcode == 0xe0 {
+                    self.index_is_8_bit()
+                } else {
+                    self.accumulator_is_8_bit()
+                };
+                let value = self.fetch_value(
+                    bus,
+                    width,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let lhs = if opcode == 0xc0 {
+                    self.state.y
+                } else if opcode == 0xe0 {
+                    self.state.x
+                } else {
+                    self.state.a
+                };
+                self.compare(lhs, value, width);
+                cycles = 2 + u32::from(!width);
+            }
+            0x10 | 0x30 | 0x50 | 0x70 | 0x80 | 0x90 | 0xb0 | 0xd0 | 0xf0 => {
                 let offset = self.fetch_byte(
                     bus,
                     &mut trace,
@@ -196,8 +386,24 @@ impl Cpu65816 {
                     &mut master_ticks,
                     &mut access_count,
                 ) as i8;
-                self.state.pc = self.state.pc.wrapping_add_signed(i16::from(offset));
-                cycles = 3;
+                let take = match opcode {
+                    0x10 => self.state.status & FLAG_NEGATIVE == 0,
+                    0x30 => self.state.status & FLAG_NEGATIVE != 0,
+                    0x50 => self.state.status & FLAG_OVERFLOW == 0,
+                    0x70 => self.state.status & FLAG_OVERFLOW != 0,
+                    0x80 => true,
+                    0x90 => self.state.status & FLAG_CARRY == 0,
+                    0xb0 => self.state.status & FLAG_CARRY != 0,
+                    0xd0 => self.state.status & FLAG_ZERO == 0,
+                    _ => self.state.status & FLAG_ZERO != 0,
+                };
+                if take {
+                    self.state.pc = self.state.pc.wrapping_add_signed(i16::from(offset));
+                }
+                cycles = 2 + u32::from(take);
+                if take && !self.same_page(self.state.pc, self.state.pc.wrapping_sub_signed(i16::from(offset))) {
+                    cycles += 1;
+                }
             }
             0x88 | 0xca | 0xc8 | 0xe8 => {
                 let index_is_x = opcode == 0xca || opcode == 0xe8;
@@ -229,6 +435,118 @@ impl Cpu65816 {
                 self.set_accumulator(value);
                 self.set_zero_negative(value, self.accumulator_is_8_bit());
                 cycles = 2;
+            }
+            0x64 | 0x85 | 0xa5 => {
+                let address = self.direct_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                if opcode == 0xa5 {
+                    let value = self.read_value(
+                        bus,
+                        address,
+                        self.accumulator_is_8_bit(),
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.set_accumulator(value);
+                    self.set_zero_negative(value, self.accumulator_is_8_bit());
+                } else {
+                    self.write_value(
+                        bus,
+                        address,
+                        if opcode == 0x85 { self.state.a } else { 0 },
+                        self.accumulator_is_8_bit(),
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                }
+                cycles = if opcode == 0xa5 { 3 } else { 3 };
+            }
+            0x84 | 0x86 => {
+                let address = self.direct_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let value = if opcode == 0x84 { self.state.y } else { self.state.x };
+                self.write_value(
+                    bus,
+                    address,
+                    value,
+                    self.index_is_8_bit(),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                cycles = 3;
+            }
+            0x8c | 0x8e | 0xac | 0xae => {
+                let address = self.absolute_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                if opcode == 0xac || opcode == 0xae {
+                    let value = self.read_value(
+                        bus,
+                        address,
+                        self.index_is_8_bit(),
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    if opcode == 0xac {
+                        self.state.y = self.set_index_width(value);
+                    } else {
+                        self.state.x = self.set_index_width(value);
+                    }
+                    self.set_zero_negative(value, self.index_is_8_bit());
+                } else {
+                    let value = if opcode == 0x8c { self.state.y } else { self.state.x };
+                    self.write_value(
+                        bus,
+                        address,
+                        value,
+                        self.index_is_8_bit(),
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                }
+                cycles = 4;
+            }
+            0xaf => {
+                let address = self.long_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.set_accumulator(value);
+                self.set_zero_negative(value, self.accumulator_is_8_bit());
+                cycles = 5;
             }
             0x8d | 0x9c => {
                 let address = self.fetch_word(
@@ -284,6 +602,98 @@ impl Cpu65816 {
                     &mut access_count,
                 );
                 cycles = 5 + u32::from(!self.accumulator_is_8_bit());
+            }
+            0x08 | 0x48 | 0x5a | 0xda => {
+                match opcode {
+                    0x08 => self.push_status(
+                        bus,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x48 => self.push_word_or_byte(
+                        bus,
+                        self.state.a,
+                        self.accumulator_is_8_bit(),
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x5a => self.push_word_or_byte(
+                        bus,
+                        self.state.y,
+                        self.index_is_8_bit(),
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    _ => self.push_word_or_byte(
+                        bus,
+                        self.state.x,
+                        self.index_is_8_bit(),
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                }
+                cycles = 3;
+            }
+            0x28 | 0x68 | 0x7a | 0xfa => {
+                match opcode {
+                    0x28 => {
+                        self.state.status = self.pop_byte(
+                            bus,
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.normalize_widths();
+                    }
+                    0x68 => {
+                        let value = self.pop_word_or_byte(
+                            bus,
+                            self.accumulator_is_8_bit(),
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.set_accumulator(value);
+                        self.set_zero_negative(value, self.accumulator_is_8_bit());
+                    }
+                    0x7a => {
+                        let value = self.pop_word_or_byte(
+                            bus,
+                            self.index_is_8_bit(),
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.state.y = self.set_index_width(value);
+                        self.set_zero_negative(value, self.index_is_8_bit());
+                    }
+                    _ => {
+                        let value = self.pop_word_or_byte(
+                            bus,
+                            self.index_is_8_bit(),
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.state.x = self.set_index_width(value);
+                        self.set_zero_negative(value, self.index_is_8_bit());
+                    }
+                }
+                cycles = 4;
+            }
+            0x1a | 0x3a => {
+                let value = if opcode == 0x1a {
+                    self.state.a.wrapping_add(1)
+                } else {
+                    self.state.a.wrapping_sub(1)
+                };
+                self.set_accumulator(value);
+                self.set_zero_negative(value, self.accumulator_is_8_bit());
+                cycles = 2;
             }
             0xa0 | 0xa2 => {
                 let value = self.fetch_value(
@@ -341,6 +751,60 @@ impl Cpu65816 {
                 self.normalize_widths();
                 cycles = 3;
             }
+            0x58 | 0x78 | 0xb8 | 0xd8 | 0xf8 => {
+                match opcode {
+                    0x58 => self.state.status &= !FLAG_IRQ_DISABLE,
+                    0x78 => self.state.status |= FLAG_IRQ_DISABLE,
+                    0xb8 => self.state.status &= !FLAG_OVERFLOW,
+                    0xd8 => self.state.status &= !0x08,
+                    _ => self.state.status |= 0x08,
+                }
+                cycles = 2;
+            }
+            0x1b | 0x3b | 0x5b | 0x7b | 0x9b | 0xbb | 0x9a | 0xba => {
+                match opcode {
+                    0x1b => {
+                        self.state.sp = self.state.a;
+                        self.normalize_widths();
+                    }
+                    0x3b => {
+                        self.state.a = self.state.sp;
+                        self.set_zero_negative(self.state.a, self.accumulator_is_8_bit());
+                    }
+                    0x5b => {
+                        self.state.direct_page = self.state.a;
+                        self.set_zero_negative(self.state.a, false);
+                    }
+                    0x7b => {
+                        self.state.a = self.state.direct_page;
+                        self.set_zero_negative(self.state.a, self.accumulator_is_8_bit());
+                    }
+                    0x9b => {
+                        self.state.y = self.state.x;
+                        self.set_zero_negative(self.state.y, self.index_is_8_bit());
+                    }
+                    0xbb => {
+                        self.state.x = self.state.y;
+                        self.set_zero_negative(self.state.x, self.index_is_8_bit());
+                    }
+                    0x9a => {
+                        self.state.sp = if self.state.emulation_mode {
+                            0x0100 | (self.state.x & 0x00ff)
+                        } else {
+                            self.state.x
+                        };
+                    }
+                    _ => {
+                        self.state.x = if self.state.emulation_mode {
+                            self.state.sp & 0x00ff
+                        } else {
+                            self.state.sp
+                        };
+                        self.set_zero_negative(self.state.x, self.index_is_8_bit());
+                    }
+                }
+                cycles = 2;
+            }
             0xea => cycles = 2,
             0xeb => {
                 self.state.a = self.state.a.rotate_left(8);
@@ -368,6 +832,14 @@ impl Cpu65816 {
                     (self.state.status & !FLAG_CARRY) | if old_emulation { FLAG_CARRY } else { 0 };
                 self.normalize_widths();
                 cycles = 2;
+            }
+            0xdb => {
+                self.state.stopped = true;
+                cycles = 3;
+            }
+            0xcb => {
+                self.state.waiting = true;
+                cycles = 3;
             }
             _ => cycles = 2,
         }
@@ -469,7 +941,217 @@ impl Cpu65816 {
         self.set_zero_negative(truncated as u16, width == 8);
     }
 
-    fn fetch_byte(
+    fn logic_acc(&mut self, value: u16, operation: impl FnOnce(u16, u16) -> u16) {
+        let mask = if self.accumulator_is_8_bit() { 0x00ff } else { 0xffff };
+        let result = operation(self.state.a & mask, value & mask);
+        self.set_accumulator(result);
+        self.set_zero_negative(result, mask == 0x00ff);
+    }
+
+    fn compare(&mut self, lhs: u16, rhs: u16, eight_bit: bool) {
+        let mask = if eight_bit { 0x00ff } else { 0xffff };
+        let left = lhs & mask;
+        let right = rhs & mask;
+        self.state.status = (self.state.status & !FLAG_CARRY)
+            | if left >= right { FLAG_CARRY } else { 0 };
+        self.set_zero_negative(left.wrapping_sub(right), eight_bit);
+    }
+
+    fn same_page(&self, lhs: u16, rhs: u16) -> bool {
+        lhs & 0xff00 == rhs & 0xff00
+    }
+
+    fn direct_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        Address24::new(u32::from(self.state.direct_page.wrapping_add(u16::from(offset))))
+    }
+
+    fn absolute_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_word(bus, trace, cycles, ticks, count);
+        Address24::new((u32::from(self.state.data_bank) << 16) | u32::from(offset))
+    }
+
+    fn long_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let low = self.fetch_byte(bus, trace, cycles, ticks, count);
+        let high = self.fetch_byte(bus, trace, cycles, ticks, count);
+        let bank = self.fetch_byte(bus, trace, cycles, ticks, count);
+        Address24::new(
+            (u32::from(bank) << 16) | u32::from(u16::from_le_bytes([low, high])),
+        )
+    }
+
+    fn read_value(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        address: Address24,
+        eight_bit: bool,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> u16 {
+        let low = self.read(
+            bus,
+            address,
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        if eight_bit {
+            u16::from(low)
+        } else {
+            let next = Address24::new((address.get() & 0xff0000) | ((address.get() + 1) & 0xffff));
+            u16::from(low)
+                | u16::from(self.read(
+                    bus,
+                    next,
+                    BusAccessKind::DataRead,
+                    trace,
+                    cycles,
+                    ticks,
+                    count,
+                )) << 8
+        }
+    }
+
+    fn push_byte(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        value: u8,
+        trace: &mut Option<&mut dyn TraceSink>,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) {
+        let address = self.stack_address();
+        bus.write(address, value);
+        *ticks += bus.access_master_ticks(address);
+        *count += 1;
+        if let Some(sink) = trace.as_deref_mut() {
+            sink.record(BusAccess {
+                kind: BusAccessKind::DataWrite,
+                address,
+                value: Some(value),
+            });
+        }
+        self.state.sp = if self.state.emulation_mode {
+            0x0100 | (self.state.sp as u8).wrapping_sub(1) as u16
+        } else {
+            self.state.sp.wrapping_sub(1)
+        };
+    }
+
+    fn pop_byte(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> u8 {
+        self.state.sp = if self.state.emulation_mode {
+            0x0100 | (self.state.sp as u8).wrapping_add(1) as u16
+        } else {
+            self.state.sp.wrapping_add(1)
+        };
+        let address = self.stack_address();
+        let value = bus.read(address);
+        *ticks += bus.access_master_ticks(address);
+        *count += 1;
+        if let Some(sink) = trace.as_deref_mut() {
+            sink.record(BusAccess {
+                kind: BusAccessKind::DataRead,
+                address,
+                value: Some(value),
+            });
+        }
+        value
+    }
+
+    fn stack_address(&self) -> Address24 {
+        Address24::new(if self.state.emulation_mode {
+            0x000100 | u32::from(self.state.sp & 0x00ff)
+        } else {
+            u32::from(self.state.sp)
+        })
+    }
+
+    fn push_word(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        value: u16,
+        trace: &mut Option<&mut dyn TraceSink>,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) {
+        self.push_byte(bus, (value >> 8) as u8, trace, ticks, count);
+        self.push_byte(bus, value as u8, trace, ticks, count);
+    }
+
+    fn push_status(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) {
+        self.push_byte(bus, self.state.status | 0x10, trace, ticks, count);
+    }
+
+    fn push_word_or_byte(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        value: u16,
+        eight_bit: bool,
+        trace: &mut Option<&mut dyn TraceSink>,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) {
+        if eight_bit {
+            self.push_byte(bus, value as u8, trace, ticks, count);
+        } else {
+            self.push_word(bus, value, trace, ticks, count);
+        }
+    }
+
+    fn pop_word_or_byte(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        eight_bit: bool,
+        trace: &mut Option<&mut dyn TraceSink>,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> u16 {
+        let low = self.pop_byte(bus, trace, ticks, count);
+        if eight_bit {
+            u16::from(low)
+        } else {
+            u16::from(low) | u16::from(self.pop_byte(bus, trace, ticks, count)) << 8
+        }
+    }
+
+    fn fetch_opcode(
         &mut self,
         bus: &mut dyn CpuBus,
         trace: &mut Option<&mut dyn TraceSink>,
@@ -483,6 +1165,29 @@ impl Cpu65816 {
             bus,
             address,
             BusAccessKind::OpcodeFetch,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        self.state.pc = self.state.pc.wrapping_add(1);
+        value
+    }
+
+    fn fetch_byte(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> u8 {
+        let address =
+            Address24::new((u32::from(self.state.program_bank) << 16) | u32::from(self.state.pc));
+        let value = self.read(
+            bus,
+            address,
+            BusAccessKind::OperandFetch,
             trace,
             cycles,
             ticks,
@@ -656,5 +1361,37 @@ mod tests {
         cpu.step_with_bus(&mut bus, None);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().a, 0x1234);
+    }
+
+    #[test]
+    fn stack_round_trip_and_subroutine_return_work() {
+        let mut bus = FlatBus::new();
+        bus.memory[..8].copy_from_slice(&[0xa9, 0x42, 0x48, 0xa9, 0x00, 0x68, 0xea, 0xea]);
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x42);
+
+        bus.memory[..8].copy_from_slice(&[0x20, 0x05, 0x00, 0xea, 0xea, 0xa9, 0x07, 0x60]);
+        cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x07);
+        assert_eq!(cpu.state().pc, 0x0003);
+    }
+
+    #[test]
+    fn conditional_branch_observes_status_flags() {
+        let mut bus = FlatBus::new();
+        bus.memory[..6].copy_from_slice(&[0x18, 0x90, 0x02, 0xa9, 0x01, 0xea]);
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().pc, 0x0005);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x00);
     }
 }
