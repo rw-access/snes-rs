@@ -22,6 +22,6 @@ pub use cartridge::{CartridgeDevice, LoadError, MappingMode, RomImage, RomMetada
 pub use console::{
     Console, ConsoleState, RestoreError, TimingState, MASTER_TICKS_PER_FRAME, SNAPSHOT_VERSION,
 };
-pub use cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep};
+pub use cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep, InterruptKind};
 pub use rewind::RewindBuffer;
 pub use video::FrameOutput;

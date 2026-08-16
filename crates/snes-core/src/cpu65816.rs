@@ -23,6 +23,13 @@ pub trait CpuBus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterruptKind {
+    Nmi,
+    Irq,
+    Cop,
+}
+
 /// Result of one instruction execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CpuStep {
@@ -102,6 +109,78 @@ impl Cpu65816 {
             &mut count,
         );
         self.state.pc = u16::from_le_bytes([lo, hi]);
+    }
+
+    pub fn service_interrupt(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        kind: InterruptKind,
+        mut trace: Option<&mut dyn TraceSink>,
+    ) -> CpuStep {
+        let mut cycles = 0;
+        let mut master_ticks = 0;
+        let mut access_count = 0;
+        if !self.state.emulation_mode {
+            self.push_byte(
+                bus,
+                self.state.program_bank,
+                &mut trace,
+                &mut master_ticks,
+                &mut access_count,
+            );
+        }
+        self.push_word(
+            bus,
+            self.state.pc,
+            &mut trace,
+            &mut master_ticks,
+            &mut access_count,
+        );
+        self.push_byte(
+            bus,
+            self.state.status,
+            &mut trace,
+            &mut master_ticks,
+            &mut access_count,
+        );
+        self.state.status |= FLAG_IRQ_DISABLE;
+        self.state.status &= !0x08;
+        self.state.program_bank = 0;
+        self.state.waiting = false;
+        let vector = match kind {
+            InterruptKind::Nmi => 0xfffa,
+            InterruptKind::Irq => 0xfffe,
+            InterruptKind::Cop => 0xfff4,
+        };
+        let lo = self.read(
+            bus,
+            Address24::new(vector),
+            BusAccessKind::VectorFetch,
+            &mut trace,
+            &mut cycles,
+            &mut master_ticks,
+            &mut access_count,
+        );
+        let hi = self.read(
+            bus,
+            Address24::new(vector + 1),
+            BusAccessKind::VectorFetch,
+            &mut trace,
+            &mut cycles,
+            &mut master_ticks,
+            &mut access_count,
+        );
+        self.state.pc = u16::from_le_bytes([lo, hi]);
+        CpuStep {
+            instruction: InstructionId::Unknown(0),
+            cycles: if self.state.emulation_mode { 7 } else { 8 },
+            master_ticks: master_ticks
+                + u64::from(
+                    (if self.state.emulation_mode { 7u32 } else { 8u32 })
+                        .saturating_sub(access_count),
+                ) * 6,
+            access_count,
+        }
     }
 
     /// Executes one instruction using the same path used by traced execution.
@@ -2589,5 +2668,21 @@ mod tests {
         cpu.step_with_bus(&mut bus, None);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().a & 0xff, 0x34);
+    }
+
+    #[test]
+    fn interrupt_entry_pushes_state_and_loads_the_selected_vector() {
+        let mut bus = FlatBus::new();
+        bus.memory[0xfffa] = 0x00;
+        bus.memory[0xfffb] = 0x80;
+        let mut cpu = Cpu65816::default();
+        cpu.state.pc = 0x1234;
+        cpu.state.waiting = true;
+        cpu.service_interrupt(&mut bus, InterruptKind::Nmi, None);
+        assert_eq!(cpu.state().pc, 0x8000);
+        assert!(!cpu.state().waiting);
+        assert_ne!(cpu.state().status & FLAG_IRQ_DISABLE, 0);
+        assert_eq!(bus.memory[0x01ff], 0x12);
+        assert_eq!(bus.memory[0x01fe], 0x34);
     }
 }

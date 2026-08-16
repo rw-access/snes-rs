@@ -5,7 +5,7 @@ use crate::{
     bus::{Address24, TraceSink},
     cartridge::{CartridgeDevice, LoadError, RomImage, RomOnlyCartridge},
     controller::ControllerState,
-    cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep},
+    cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep, InterruptKind},
     dma::Dma,
     ppu::{Ppu, SCREEN_HEIGHT, SCREEN_WIDTH},
     video::FrameOutput,
@@ -103,6 +103,20 @@ impl Console {
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         drop(bus);
         self.run_pending_dma();
+        step
+    }
+
+    pub fn request_interrupt(&mut self, kind: InterruptKind) -> CpuStep {
+        let mut bus = ConsoleBus {
+            wram: &mut self.wram,
+            cartridge: &mut *self.cartridge,
+            ppu: &mut self.ppu,
+            controller: &mut self.controller,
+            dma: Some(&mut self.dma),
+            apu: &mut self.apu,
+        };
+        let step = self.cpu.service_interrupt(&mut bus, kind, None);
+        self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         step
     }
 
