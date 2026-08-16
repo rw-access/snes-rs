@@ -25,6 +25,7 @@ const CPU_IRQ_DISABLE: u8 = 0x04;
 /// The complete SNES machine state owned by the core.
 pub struct Console {
     cpu: Cpu65816,
+    sa1_cpu: Option<Cpu65816>,
     rom_identity: u64,
     #[allow(dead_code)]
     cartridge: Box<dyn CartridgeDevice>,
@@ -47,6 +48,7 @@ impl Console {
         let rom_identity = rom.identity();
         Ok(Self {
             cpu: Cpu65816::default(),
+            sa1_cpu: None,
             rom_identity,
             cartridge: Box::new(RomOnlyCartridge::new(rom)),
             wram: vec![0; 128 * 1024],
@@ -64,6 +66,7 @@ impl Console {
     /// Resets the machine state.
     pub fn reset(&mut self) {
         self.cpu.reset();
+        self.sa1_cpu = None;
         self.ppu = Ppu::default();
         self.dma = Dma::default();
         self.controller = ControllerPorts::default();
@@ -203,9 +206,38 @@ impl Console {
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         self.run_pending_dma();
         self.run_hdma_boundaries();
+        self.cartridge
+            .run_for_master_ticks(self.timing.master_ticks.saturating_sub(before));
+        self.run_sa1_for_master_ticks(self.timing.master_ticks.saturating_sub(before));
         self.apu
             .run_for_master_ticks(self.timing.master_ticks.saturating_sub(before));
         step
+    }
+
+    fn run_sa1_for_master_ticks(&mut self, ticks: u64) {
+        let Some(vector) = self.cartridge.sa1_reset_vector() else {
+            return;
+        };
+        if self.sa1_cpu.is_none() {
+            let mut cpu = Cpu65816::default();
+            cpu.reset_at(vector);
+            self.sa1_cpu = Some(cpu);
+        }
+        let mut cpu = self.sa1_cpu.take().expect("SA-1 CPU initialized");
+        let steps = (ticks / 2).max(1).min(100_000);
+        for _ in 0..steps {
+            let mut bus = Sa1Bus {
+                cartridge: &mut *self.cartridge,
+            };
+            cpu.step_with_bus(&mut bus, None);
+            if cpu.state().stopped {
+                break;
+            }
+        }
+        self.sa1_cpu = Some(cpu);
+        if self.cartridge.take_sa1_irq() {
+            self.timing.pending_irq = true;
+        }
     }
 
     fn run_pending_dma(&mut self) {
@@ -442,6 +474,20 @@ struct ConsoleBus<'a> {
     dma: Option<&'a mut Dma>,
     apu: &'a mut Apu,
     timing: &'a mut TimingState,
+}
+
+struct Sa1Bus<'a> {
+    cartridge: &'a mut dyn CartridgeDevice,
+}
+
+impl CpuBus for Sa1Bus<'_> {
+    fn read(&mut self, address: Address24) -> u8 {
+        self.cartridge.read_sa1(address)
+    }
+
+    fn write(&mut self, address: Address24, value: u8) {
+        self.cartridge.write_sa1(address, value);
+    }
 }
 
 impl CpuBus for ConsoleBus<'_> {

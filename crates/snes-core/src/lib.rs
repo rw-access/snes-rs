@@ -11,6 +11,7 @@ pub mod console;
 pub mod controller;
 pub mod cpu65816;
 pub mod dma;
+pub mod gsu;
 pub mod instructions;
 pub mod ppu;
 pub mod rewind;

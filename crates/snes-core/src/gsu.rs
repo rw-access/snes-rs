@@ -75,10 +75,22 @@ pub struct GsuFlags {
 impl GsuFlags {
     /// The four arithmetic bits in the Super FX status register.
     pub fn status_bits(self) -> u8 {
-        (self.sign as u8) << 7
-            | (self.zero as u8) << 6
-            | (self.overflow as u8) << 5
-            | (self.carry as u8) << 4
+        // SFR's low byte is laid out as ... OV S CY Z (bits 4..1).  This is
+        // distinct from the VSCZ display order used by the PeterLemon tests.
+        let mut status = 0;
+        if self.overflow {
+            status |= 1 << 4;
+        }
+        if self.sign {
+            status |= 1 << 3;
+        }
+        if self.carry {
+            status |= 1 << 2;
+        }
+        if self.zero {
+            status |= 1 << 1;
+        }
+        status
     }
 }
 
@@ -116,12 +128,14 @@ pub struct Gsu {
     flags: GsuFlags,
     alt: GsuAlt,
     halted: bool,
+    stop_pending: bool,
     last_ram_address: u16,
     program_bank: u8,
     rom_bank: u8,
     ram_bank: u8,
     cache_base: u16,
     cache_valid: bool,
+    cache: [u8; 512],
     color: u8,
 }
 
@@ -140,13 +154,15 @@ impl Gsu {
             move_mode: false,
             flags: GsuFlags::default(),
             alt: GsuAlt::None,
-            halted: false,
+            halted: true,
+            stop_pending: false,
             last_ram_address: 0,
             program_bank: 0,
             rom_bank: 0,
             ram_bank: 0,
             cache_base: 0,
             cache_valid: false,
+            cache: [0; 512],
             color: 0,
         }
     }
@@ -181,12 +197,29 @@ impl Gsu {
         self.flags
     }
 
+    pub fn clear_flags(&mut self) {
+        self.flags = GsuFlags::default();
+    }
+
     pub fn alt(&self) -> GsuAlt {
         self.alt
     }
 
     pub fn halted(&self) -> bool {
         self.halted
+    }
+
+    pub fn start(&mut self) {
+        self.halted = false;
+        self.source = 0;
+        self.destination = 0;
+        self.move_mode = false;
+        self.alt = GsuAlt::None;
+        self.stop_pending = false;
+    }
+
+    pub fn stop(&mut self) {
+        self.halted = true;
     }
 
     pub fn program_bank(&self) -> u8 {
@@ -201,8 +234,17 @@ impl Gsu {
         self.rom_bank
     }
 
+    pub fn set_rom_bank(&mut self, value: u8) {
+        self.rom_bank = value & 0x7f;
+        self.cache_valid = false;
+    }
+
     pub fn ram_bank(&self) -> u8 {
         self.ram_bank
+    }
+
+    pub fn set_ram_bank(&mut self, value: u8) {
+        self.ram_bank = value & 0x01;
     }
 
     pub fn color(&self) -> u8 {
@@ -213,27 +255,39 @@ impl Gsu {
         self.cache_base
     }
 
+    pub fn set_cache_base(&mut self, value: u16) {
+        self.cache_base = value & 0x01f0;
+        self.cache_valid = false;
+    }
+
     pub fn cache_valid(&self) -> bool {
         self.cache_valid
+    }
+
+    pub fn read_cache(&self, address: u16) -> u8 {
+        self.cache[usize::from(address) & 0x01ff]
+    }
+
+    pub fn write_cache(&mut self, address: u16, value: u8) {
+        self.cache[usize::from(address) & 0x01ff] = value;
+    }
+
+    pub fn cache_snapshot(&self) -> [u8; 512] {
+        self.cache
     }
 
     /// Execute one instruction.  Unsupported rendering instructions return an
     /// error so the integration layer cannot accidentally claim full GSU
     /// compatibility.
     pub fn step<B: GsuBus>(&mut self, bus: &mut B) -> Result<GsuStep, GsuError> {
-        if self.halted {
-            return Ok(GsuStep {
-                pc: self.pc(),
-                opcode: 0,
-                next_pc: self.pc(),
-                cycles: 0,
-                halted: true,
-            });
-        }
-
         let pc = self.pc();
         let opcode = self.fetch_rom(bus);
+        let delay_slot = self.stop_pending;
         let cycles = self.execute(bus, pc, opcode)?;
+        if delay_slot {
+            self.stop_pending = false;
+            self.halted = true;
+        }
         Ok(GsuStep {
             pc,
             opcode,
@@ -245,8 +299,12 @@ impl Gsu {
 
     /// Run until STOP or until `limit` instructions have been executed.
     pub fn run<B: GsuBus>(&mut self, bus: &mut B, limit: usize) -> Result<usize, GsuError> {
+        self.start();
         for count in 0..limit {
-            self.step(bus)?;
+            let step = self.step(bus)?;
+            if step.opcode == 0 {
+                return Ok(count + 1);
+            }
             if self.halted {
                 return Ok(count + 1);
             }
@@ -258,7 +316,10 @@ impl Gsu {
         let n = (opcode & 0x0f) as usize;
         let cycles = match opcode {
             0x00 => {
-                self.halted = true;
+                // STOP has a one-instruction delay slot.  The instruction
+                // immediately following STOP is fetched and executed before
+                // the GSU reports itself halted.
+                self.stop_pending = true;
                 1
             }
             0x01 => 1,
@@ -386,20 +447,17 @@ impl Gsu {
                 1
             }
             0x50..=0x5f => {
-                let (rhs, immediate) = match self.alt {
-                    GsuAlt::Alt1 => (self.registers[n], false),
-                    GsuAlt::Alt2 => (n as u16, true),
-                    GsuAlt::Alt3 => (n as u16, true),
-                    GsuAlt::None => (self.registers[n], false),
-                };
-                if self.alt == GsuAlt::Alt1 {
-                    self.add(rhs, true, true);
-                } else if self.alt == GsuAlt::Alt3 {
-                    self.add(rhs, true, true);
+                // ALT1 selects ADC Rn; ALT3 selects ADC #n.  WITH selects
+                // the source and destination registers before ALT1 is seen,
+                // so the opcode's nibbled register is only the RHS here.
+                let immediate = matches!(self.alt, GsuAlt::Alt2 | GsuAlt::Alt3);
+                let rhs = if immediate {
+                    n as u16
                 } else {
-                    self.add(rhs, false, true);
-                }
-                let _ = immediate;
+                    self.registers[n]
+                };
+                let with_carry = matches!(self.alt, GsuAlt::Alt1 | GsuAlt::Alt3);
+                self.add(rhs, with_carry, true);
                 1
             }
             0x60..=0x6f => {
@@ -413,11 +471,14 @@ impl Gsu {
             }
             0x70 => {
                 let value = (self.registers[7] & 0xff00) | ((self.registers[8] & 0xff00) >> 8);
+                // MERGE derives V/S/C/Z from selected bits of the merged
+                // word, rather than from the usual arithmetic result.
+                self.registers[self.destination] = value;
                 self.flags.overflow = value & 0xc0c0 != 0;
-                self.flags.zero = value & 0xf0f0 == 0;
-                self.flags.sign = (value | value << 8) & 0x8000 != 0;
+                self.flags.sign = value & 0x8080 != 0;
                 self.flags.carry = value & 0xe0e0 != 0;
-                self.write_result(value);
+                self.flags.zero = value & 0xf0f0 != 0;
+                self.clear_alt();
                 1
             }
             0x71..=0x7f => {
@@ -494,7 +555,10 @@ impl Gsu {
                 1
             }
             0x9e => {
-                self.write_result(self.source_value() & 0x00ff);
+                let source = self.source_value();
+                let result = source & 0x00ff;
+                self.write_result(result);
+                self.flags.sign = result & 0x0080 != 0;
                 1
             }
             0x9f => {
@@ -532,6 +596,7 @@ impl Gsu {
                 if self.move_mode {
                     let value = self.registers[n];
                     self.write_result(value);
+                    self.flags.overflow = value & 0x8000 != 0;
                 } else {
                     self.source = n;
                     self.clear_alt();
@@ -539,7 +604,10 @@ impl Gsu {
                 1
             }
             0xc0 => {
-                self.write_result(self.source_value() >> 8);
+                let source = self.source_value();
+                let result = source >> 8;
+                self.write_result(result);
+                self.flags.sign = result & 0x0080 != 0;
                 1
             }
             0xc1..=0xcf => {
@@ -747,6 +815,26 @@ mod tests {
         assert!(gsu.flags().sign);
         assert!(gsu.flags().overflow);
         assert!(!gsu.flags().zero);
+    }
+
+    #[test]
+    fn adc_register_form_matches_materialized_gsu_adc_case_zero() {
+        let (gsu, _) = run(&[
+            0xf1, 0xff, 0x7f, // iwt r1, $7fff
+            0xf0, 0x01, 0x80, // iwt r0, $8001
+            0x21, // with r1: source and destination are r1
+            0x3d, // alt1: ADC register form
+            0x50, // adc r0: $7fff + $8001 = $0000, with carry
+            0x00,
+        ]);
+
+        assert_eq!(gsu.register(0), 0x8001);
+        assert_eq!(gsu.register(1), 0x0000);
+        assert_eq!(gsu.flags().status_bits(), 0x06); // VSCZ = 0011: C and Z
+        assert!(!gsu.flags().overflow);
+        assert!(!gsu.flags().sign);
+        assert!(gsu.flags().carry);
+        assert!(gsu.flags().zero);
     }
 
     #[test]

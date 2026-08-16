@@ -1,6 +1,9 @@
 //! Cartridge image and mapping extension points.
 
-use crate::bus::{AccessSpeed, Address24};
+use crate::{
+    bus::{AccessSpeed, Address24},
+    gsu::{Gsu, GsuBus},
+};
 
 /// Normalized cartridge metadata retained alongside the immutable image.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +168,24 @@ pub trait CartridgeDevice {
     fn write(&mut self, address: Address24, value: u8);
     fn access_speed(&self, address: Address24) -> AccessSpeed;
 
+    fn run_for_master_ticks(&mut self, _ticks: u64) {}
+
+    fn read_sa1(&mut self, address: Address24) -> u8 {
+        self.read(address)
+    }
+
+    fn write_sa1(&mut self, address: Address24, value: u8) {
+        self.write(address, value);
+    }
+
+    fn sa1_reset_vector(&self) -> Option<u16> {
+        None
+    }
+
+    fn take_sa1_irq(&mut self) -> bool {
+        false
+    }
+
     fn save_state(&self) -> Vec<u8> {
         Vec::new()
     }
@@ -182,6 +203,8 @@ pub(crate) struct RomOnlyCartridge {
     enhancement_ram: Vec<u8>,
     enhancement_iram: Vec<u8>,
     enhancement_registers: Vec<u8>,
+    gsu: Option<Gsu>,
+    sa1_irq_pending: bool,
 }
 
 impl RomOnlyCartridge {
@@ -201,6 +224,8 @@ impl RomOnlyCartridge {
             enhancement_ram: vec![0; enhancement_ram_size],
             enhancement_iram: vec![0; if chipset == 0x30 { 0x800 } else { 0 }],
             enhancement_registers: vec![0; 0x400],
+            gsu: (chipset == 0x10).then(Gsu::new),
+            sa1_irq_pending: false,
             rom,
         }
     }
@@ -214,6 +239,10 @@ impl CartridgeDevice for RomOnlyCartridge {
                 EnhancementIndex::Ram(index) => self.enhancement_ram[index],
                 EnhancementIndex::BwRam(index) => self.enhancement_ram[index],
                 EnhancementIndex::IRam(index) => self.enhancement_iram[index],
+                EnhancementIndex::GsuCache(index) => self
+                    .gsu
+                    .as_ref()
+                    .map_or(0, |gsu| gsu.read_cache(index as u16)),
                 EnhancementIndex::Register(index) => self.read_enhancement_register(index),
                 EnhancementIndex::Fixed(value) => value,
             };
@@ -239,8 +268,13 @@ impl CartridgeDevice for RomOnlyCartridge {
                     }
                 }
                 EnhancementIndex::IRam(index) => {
-                    if self.sa1_iram_write_allowed(index) {
+                    if self.sa1_iram_write_allowed(index, false) {
                         self.enhancement_iram[index] = value;
+                    }
+                }
+                EnhancementIndex::GsuCache(index) => {
+                    if let Some(gsu) = self.gsu.as_mut() {
+                        gsu.write_cache(index as u16, value);
                     }
                 }
                 EnhancementIndex::Register(index) => self.write_enhancement_register(index, value),
@@ -251,8 +285,93 @@ impl CartridgeDevice for RomOnlyCartridge {
         }
     }
 
+    fn read_sa1(&mut self, address: Address24) -> u8 {
+        let raw = address.get() as usize;
+        if let Some(index) = self.sa1_enhancement_index(raw) {
+            return match index {
+                EnhancementIndex::BwRam(index) | EnhancementIndex::Ram(index) => {
+                    self.enhancement_ram[index]
+                }
+                EnhancementIndex::IRam(index) => self.enhancement_iram[index],
+                EnhancementIndex::Register(index) => self.read_sa1_register(index),
+                EnhancementIndex::Fixed(value) => value,
+                EnhancementIndex::GsuCache(index) => self
+                    .gsu
+                    .as_ref()
+                    .map_or(0, |gsu| gsu.read_cache(index as u16)),
+            };
+        }
+        self.read(address)
+    }
+
+    fn write_sa1(&mut self, address: Address24, value: u8) {
+        let raw = address.get() as usize;
+        if let Some(index) = self.sa1_enhancement_index(raw) {
+            match index {
+                EnhancementIndex::BwRam(index) => {
+                    if self.sa1_bwram_write_allowed(index) {
+                        self.enhancement_ram[index] = value;
+                    }
+                }
+                EnhancementIndex::Ram(index) => self.enhancement_ram[index] = value,
+                EnhancementIndex::IRam(index) => {
+                    if self.sa1_iram_write_allowed(index, true) {
+                        self.enhancement_iram[index] = value;
+                    }
+                }
+                EnhancementIndex::Register(index) => self.write_sa1_register_from_sa1(index, value),
+                EnhancementIndex::Fixed(_) => {}
+                EnhancementIndex::GsuCache(index) => {
+                    if let Some(gsu) = self.gsu.as_mut() {
+                        gsu.write_cache(index as u16, value);
+                    }
+                }
+            }
+        } else {
+            self.write(address, value);
+        }
+    }
+
+    fn sa1_reset_vector(&self) -> Option<u16> {
+        (self.rom.metadata().chipset & 0xf0 == 0x30)
+            .then(|| {
+                u16::from_le_bytes([
+                    self.enhancement_registers[0x03],
+                    self.enhancement_registers[0x04],
+                ])
+            })
+            .filter(|vector| *vector != 0)
+    }
+
+    fn take_sa1_irq(&mut self) -> bool {
+        let pending = self.sa1_irq_pending;
+        self.sa1_irq_pending = false;
+        pending
+    }
+
     fn access_speed(&self, _address: Address24) -> AccessSpeed {
         AccessSpeed::Fast
+    }
+
+    fn run_for_master_ticks(&mut self, ticks: u64) {
+        let Some(mut gsu) = self.gsu.take() else {
+            return;
+        };
+        let count = (ticks / 6).saturating_add(1).min(100_000) as usize;
+        let mut bus = CartridgeGsuBus {
+            rom: self.rom.as_bytes(),
+            ram: &mut self.enhancement_ram,
+            cache: gsu.cache_snapshot(),
+        };
+        for _ in 0..count {
+            if gsu.halted() {
+                break;
+            }
+            if gsu.step(&mut bus).is_err() {
+                break;
+            }
+        }
+        self.gsu = Some(gsu);
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -296,7 +415,11 @@ impl RomOnlyCartridge {
             // register file is intentionally stateful so S-CPU firmware can
             // probe it while a full GSU execution core is added later.
             0x10 if (0x3000..=0x32ff).contains(&offset) => {
-                Some(EnhancementIndex::Register(offset - 0x3000))
+                if (0x3100..=0x32ff).contains(&offset) {
+                    Some(EnhancementIndex::GsuCache(offset - 0x3100))
+                } else {
+                    Some(EnhancementIndex::Register(offset - 0x3000))
+                }
             }
             // SA-1 control/status registers are in the $2200-$23ff range.
             0x30 if (0x2200..=0x23ff).contains(&offset) => {
@@ -340,6 +463,27 @@ impl RomOnlyCartridge {
         }
     }
 
+    fn sa1_enhancement_index(&self, raw: usize) -> Option<EnhancementIndex> {
+        if self.rom.metadata().chipset & 0xf0 != 0x30 {
+            return None;
+        }
+        let bank = raw >> 16;
+        let offset = raw & 0xffff;
+        let system_bank = bank <= 0x3f || (0x80..=0xbf).contains(&bank);
+        if system_bank && (0x2200..=0x23ff).contains(&offset) {
+            return Some(EnhancementIndex::Register(offset - 0x2200));
+        }
+        if system_bank && offset < 0x4000 {
+            return Some(EnhancementIndex::IRam(offset & 0x07ff));
+        }
+        if (0x40..=0x5f).contains(&bank) {
+            return Some(EnhancementIndex::BwRam(
+                ((bank - 0x40) * 0x10000 + offset) % self.enhancement_ram.len(),
+            ));
+        }
+        None
+    }
+
     fn sa1_bwram_index(&self, offset: usize, _sa1_cpu: bool) -> usize {
         let mapping = if _sa1_cpu {
             self.enhancement_registers[0x25] & 0x7f
@@ -350,19 +494,79 @@ impl RomOnlyCartridge {
     }
 
     fn sa1_bwram_write_allowed(&self, index: usize) -> bool {
-        let enabled = self.enhancement_registers[0x26] & 0x80 != 0;
+        let enabled = self.enhancement_registers[0x26] & 0x80 != 0
+            || self.enhancement_registers[0x27] & 0x80 != 0;
         let protected_pages = usize::from(self.enhancement_registers[0x28] & 0x0f).min(0x0a);
         let protected_size = 0x100usize << protected_pages;
         enabled || index >= protected_size
     }
 
-    fn sa1_iram_write_allowed(&self, index: usize) -> bool {
-        let mask = self.enhancement_registers[0x29];
-        mask & (1 << (index / 0x100)) == 0
+    fn sa1_iram_write_allowed(&self, index: usize, sa1_cpu: bool) -> bool {
+        let mask = self.enhancement_registers[if sa1_cpu { 0x2a } else { 0x29 }];
+        mask & (1 << (index / 0x100)) != 0
     }
 
     fn write_enhancement_register(&mut self, index: usize, value: u8) {
         match self.rom.metadata().chipset & 0xf0 {
+            0x10 if index == 0x30 => {
+                self.enhancement_registers[index] = value;
+                if let Some(gsu) = self.gsu.as_mut() {
+                    if value & 0x1e == 0 {
+                        gsu.clear_flags();
+                    }
+                    if value & 0x20 != 0 {
+                        gsu.start();
+                    } else {
+                        gsu.stop();
+                    }
+                }
+            }
+            0x10 if index < 0x20 => {
+                if let Some(gsu) = self.gsu.as_mut() {
+                    let register = index / 2;
+                    let old = gsu.register(register);
+                    let updated = if index & 1 == 0 {
+                        (old & 0xff00) | u16::from(value)
+                    } else {
+                        (old & 0x00ff) | (u16::from(value) << 8)
+                    };
+                    gsu.set_register(register, updated);
+                    if register == 15 && index & 1 != 0 {
+                        gsu.set_pc(updated);
+                        gsu.start();
+                    }
+                }
+            }
+            0x10 if index == 0x34 => {
+                self.enhancement_registers[index] = value;
+                if let Some(gsu) = self.gsu.as_mut() {
+                    gsu.set_program_bank(value);
+                }
+            }
+            0x10 if index == 0x36 => {
+                self.enhancement_registers[index] = value;
+                if let Some(gsu) = self.gsu.as_mut() {
+                    gsu.set_rom_bank(value);
+                }
+            }
+            0x10 if index == 0x3c => {
+                self.enhancement_registers[index] = value & 0x01;
+                if let Some(gsu) = self.gsu.as_mut() {
+                    gsu.set_ram_bank(value);
+                }
+            }
+            0x10 if (0x3e..=0x3f).contains(&index) => {
+                self.enhancement_registers[index] = value;
+                if let Some(gsu) = self.gsu.as_mut() {
+                    let current = gsu.cache_base();
+                    let updated = if index == 0x3e {
+                        (current & 0xff00) | u16::from(value)
+                    } else {
+                        (current & 0x00ff) | (u16::from(value) << 8)
+                    };
+                    gsu.set_cache_base(updated);
+                }
+            }
             0x30 => self.write_sa1_register(index, value),
             0xf0 => self.write_cx4_register(index, value),
             _ => self.enhancement_registers[index] = value,
@@ -370,11 +574,28 @@ impl RomOnlyCartridge {
     }
 
     fn read_enhancement_register(&self, index: usize) -> u8 {
-        if self.rom.metadata().chipset & 0xf0 == 0x30 {
+        if self.rom.metadata().chipset & 0xf0 == 0x10 {
             match index {
+                0x00..=0x1f => {
+                    let register = index / 2;
+                    let value = self.gsu.as_ref().map_or(0, |gsu| gsu.register(register));
+                    if index & 1 == 0 {
+                        value as u8
+                    } else {
+                        (value >> 8) as u8
+                    }
+                }
+                0x30 => self.gsu_status(),
+                _ => self.enhancement_registers[index],
+            }
+        } else if self.rom.metadata().chipset & 0xf0 == 0x30 {
+            match index {
+                0x100 => self.enhancement_registers[0x09],
+                0x101 => self.enhancement_registers[0x00],
+                0x10e => 0,
                 // The status/timer/math read ports start clear until a
                 // coprocessor execution core supplies live values.
-                0x100..=0x10e => self.enhancement_registers[index],
+                0x102..=0x10d => self.enhancement_registers[index],
                 _ => 0,
             }
         } else if self.rom.metadata().chipset & 0xf0 == 0xf0 {
@@ -389,16 +610,46 @@ impl RomOnlyCartridge {
         }
     }
 
+    fn gsu_status(&self) -> u8 {
+        let Some(gsu) = self.gsu.as_ref() else {
+            return 0;
+        };
+        let mut status = gsu.flags().status_bits();
+        if !gsu.halted() {
+            status |= 0x20;
+        }
+        status
+    }
+
     fn write_sa1_register(&mut self, index: usize, value: u8) {
         let value = match index {
             0x00 | 0x09 => value,
             0x24 => value & 0x1f,
-            0x25 => value & 0xbf,
+            0x25 => value & 0x7f,
             0x26 | 0x27 => value & 0x80,
             0x28 => value & 0x0f,
             _ => value,
         };
         self.enhancement_registers[index] = value;
+        if index == 0x01 && value & 0x80 != 0 && self.enhancement_registers[0x09] & 0x80 != 0 {
+            self.sa1_irq_pending = true;
+        }
+    }
+
+    fn read_sa1_register(&self, index: usize) -> u8 {
+        match index {
+            0x100 => self.enhancement_registers[0x09],
+            0x101 => self.enhancement_registers[0x00],
+            0x10e => 0,
+            _ => self.enhancement_registers[index],
+        }
+    }
+
+    fn write_sa1_register_from_sa1(&mut self, index: usize, value: u8) {
+        self.write_sa1_register(index, value);
+        if index == 0x09 && value & 0x80 != 0 && self.enhancement_registers[0x01] & 0x80 != 0 {
+            self.sa1_irq_pending = true;
+        }
     }
 
     fn write_cx4_register(&mut self, index: usize, value: u8) {
@@ -496,11 +747,38 @@ impl RomOnlyCartridge {
     }
 }
 
+struct CartridgeGsuBus<'a> {
+    rom: &'a [u8],
+    ram: &'a mut [u8],
+    cache: [u8; 512],
+}
+
+impl GsuBus for CartridgeGsuBus<'_> {
+    fn read_rom(&mut self, address: u32) -> u8 {
+        let raw = address as usize;
+        if raw < 0x0200 {
+            return self.cache[raw & 0x01ff];
+        }
+        let index = (((raw & 0x7f_0000) >> 1) | (raw & 0x7fff)) % self.rom.len();
+        self.rom[index]
+    }
+
+    fn read_ram(&mut self, address: u32) -> u8 {
+        self.ram[address as usize % self.ram.len()]
+    }
+
+    fn write_ram(&mut self, address: u32, value: u8) {
+        let index = address as usize % self.ram.len();
+        self.ram[index] = value;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnhancementIndex {
     Ram(usize),
     BwRam(usize),
     IRam(usize),
+    GsuCache(usize),
     Register(usize),
     Fixed(u8),
 }

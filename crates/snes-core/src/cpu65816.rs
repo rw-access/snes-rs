@@ -85,6 +85,10 @@ impl Cpu65816 {
     }
 
     pub fn reset_with_bus(&mut self, bus: &mut dyn CpuBus) {
+        self.reset_with_vector(bus, 0xfffc);
+    }
+
+    pub fn reset_with_vector(&mut self, bus: &mut dyn CpuBus, vector: u16) {
         self.reset();
         let mut trace = None;
         let mut cycles = 0;
@@ -92,7 +96,7 @@ impl Cpu65816 {
         let mut count = 0;
         let lo = self.read(
             bus,
-            Address24::new(0x00fffc),
+            Address24::new(u32::from(vector)),
             BusAccessKind::VectorFetch,
             &mut trace,
             &mut cycles,
@@ -101,7 +105,7 @@ impl Cpu65816 {
         );
         let hi = self.read(
             bus,
-            Address24::new(0x00fffd),
+            Address24::new(u32::from(vector) + 1),
             BusAccessKind::VectorFetch,
             &mut trace,
             &mut cycles,
@@ -109,6 +113,11 @@ impl Cpu65816 {
             &mut count,
         );
         self.state.pc = u16::from_le_bytes([lo, hi]);
+    }
+
+    pub fn reset_at(&mut self, pc: u16) {
+        self.reset();
+        self.state.pc = pc;
     }
 
     pub fn service_interrupt(

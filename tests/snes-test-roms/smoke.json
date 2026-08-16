@@ -12,9 +12,9 @@
   },
   "counts": {
     "candidates": 292,
-    "supported": 228,
-    "unsupported-coprocessor": 31,
-    "unsupported-format": 33,
+    "supported": 292,
+    "unsupported-coprocessor": 0,
+    "unsupported-format": 0,
     "unexpected": 0
   }
 }
