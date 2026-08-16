@@ -1020,24 +1020,13 @@ impl Cpu65816 {
             }
             0x04 | 0x0c | 0x14 | 0x1c => {
                 let address = if opcode == 0x04 || opcode == 0x14 {
-                    if opcode == 0x14 {
-                        self.direct_indexed_address(
-                            bus,
-                            self.state.x,
-                            &mut trace,
-                            &mut cycles,
-                            &mut master_ticks,
-                            &mut access_count,
-                        )
-                    } else {
-                        self.direct_address(
-                            bus,
-                            &mut trace,
-                            &mut cycles,
-                            &mut master_ticks,
-                            &mut access_count,
-                        )
-                    }
+                    self.direct_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
                 } else if opcode == 0x1c {
                     self.absolute_address(
                         bus,
@@ -1055,31 +1044,46 @@ impl Cpu65816 {
                         &mut access_count,
                     )
                 };
+                let mask = if self.accumulator_is_8_bit() {
+                    0x00ff
+                } else {
+                    0xffff
+                };
                 let value = self.read_value(
                     bus,
                     address,
-                    self.accumulator_is_8_bit(),
+                    mask == 0x00ff,
                     &mut trace,
                     &mut cycles,
                     &mut master_ticks,
                     &mut access_count,
                 );
-                self.set_zero_negative(self.state.a & value, self.accumulator_is_8_bit());
+                let accumulator = self.state.a & mask;
+                self.state.status = (self.state.status & !FLAG_ZERO)
+                    | if accumulator & value & mask == 0 {
+                        FLAG_ZERO
+                    } else {
+                        0
+                    };
                 let result = if opcode == 0x04 || opcode == 0x0c {
-                    value | self.state.a
+                    value | accumulator
                 } else {
-                    value & !self.state.a
+                    value & !accumulator
                 };
                 self.write_value(
                     bus,
                     address,
                     result,
-                    self.accumulator_is_8_bit(),
+                    mask == 0x00ff,
                     &mut trace,
                     &mut master_ticks,
                     &mut access_count,
                 );
-                cycles = 5;
+                cycles = if opcode == 0x04 || opcode == 0x14 {
+                    5
+                } else {
+                    6
+                };
             }
             0x10 | 0x30 | 0x50 | 0x70 | 0x80 | 0x90 | 0xb0 | 0xd0 | 0xf0 => {
                 let offset = self.fetch_byte(
@@ -1144,14 +1148,25 @@ impl Cpu65816 {
                 self.set_zero_negative(value, self.accumulator_is_8_bit());
                 cycles = 2;
             }
-            0x64 | 0x85 | 0xa5 => {
-                let address = self.direct_address(
-                    bus,
-                    &mut trace,
-                    &mut cycles,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
+            0x64 | 0x74 | 0x85 | 0xa5 => {
+                let address = if opcode == 0x74 {
+                    self.direct_indexed_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.direct_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
                 if opcode == 0xa5 {
                     let value = self.read_value(
                         bus,
@@ -1168,14 +1183,18 @@ impl Cpu65816 {
                     self.write_value(
                         bus,
                         address,
-                        if opcode == 0x85 { self.state.a } else { 0 },
+                        if opcode == 0x85 || opcode == 0xa5 {
+                            self.state.a
+                        } else {
+                            0
+                        },
                         self.accumulator_is_8_bit(),
                         &mut trace,
                         &mut master_ticks,
                         &mut access_count,
                     );
                 }
-                cycles = if opcode == 0xa5 { 3 } else { 3 };
+                cycles = if opcode == 0x74 { 4 } else { 3 };
             }
             0x84 | 0x86 => {
                 let address = self.direct_address(
@@ -2010,7 +2029,6 @@ impl Cpu65816 {
                 self.state.waiting = true;
                 cycles = 3;
             }
-            _ => cycles = 2,
         }
 
         CpuStep {
@@ -2237,11 +2255,13 @@ impl Cpu65816 {
         count: &mut u32,
     ) -> Address24 {
         let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        let indexed_offset = if self.state.emulation_mode && self.state.direct_page & 0x00ff == 0 {
+            u16::from(offset.wrapping_add(index as u8))
+        } else {
+            u16::from(offset).wrapping_add(index)
+        };
         Address24::new(u32::from(
-            self.state
-                .direct_page
-                .wrapping_add(u16::from(offset))
-                .wrapping_add(index),
+            self.state.direct_page.wrapping_add(indexed_offset),
         ))
     }
 
@@ -2920,6 +2940,59 @@ mod tests {
         assert_eq!(cpu.state().a & 0xff, 0x3c);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(bus.memory[0x1241], 0x3c);
+    }
+
+    #[test]
+    fn tsb_and_trb_use_direct_operands_and_only_update_zero() {
+        let mut bus = FlatBus::new();
+        bus.memory[..4].copy_from_slice(&[0x04, 0x10, 0x14, 0x20]);
+        bus.memory[0x10] = 0x01;
+        bus.memory[0x20] = 0x03;
+        bus.memory[0x30] = 0xa5;
+        let mut cpu = Cpu65816::default();
+        cpu.state.a = 0x01;
+        cpu.state.x = 0x10;
+        cpu.state.status = FLAG_NEGATIVE | FLAG_OVERFLOW;
+
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(bus.memory[0x10], 0x01);
+        assert_eq!(cpu.state().status, FLAG_NEGATIVE | FLAG_OVERFLOW);
+
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(bus.memory[0x20], 0x02);
+        assert_eq!(bus.memory[0x30], 0xa5);
+        assert_eq!(cpu.state().status, FLAG_NEGATIVE | FLAG_OVERFLOW);
+    }
+
+    #[test]
+    fn stz_direct_indexed_writes_the_indexed_zero_operand() {
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0x74, 0x10]);
+        bus.memory[0x10] = 0x55;
+        bus.memory[0x12] = 0xaa;
+        let mut cpu = Cpu65816::default();
+        cpu.state.x = 2;
+        cpu.state.a = 0x7f;
+
+        let step = cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(bus.memory[0x10], 0x55);
+        assert_eq!(bus.memory[0x12], 0);
+        assert_eq!(step.cycles, 4);
+
+        bus.memory[..2].copy_from_slice(&[0x74, 0xe4]);
+        bus.memory[0x027d] = 0xaa;
+        bus.memory[0x037d] = 0xbb;
+        cpu.restore(CpuState {
+            direct_page: 0x0200,
+            x: 0x0099,
+            status: FLAG_MEMORY | FLAG_INDEX,
+            emulation_mode: true,
+            ..CpuState::default()
+        });
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(bus.memory[0x027d], 0);
+        assert_eq!(bus.memory[0x037d], 0xbb);
     }
 
     #[test]

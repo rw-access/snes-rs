@@ -121,6 +121,13 @@ struct OamSprite {
     size_large: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScreenPixel {
+    color: u16,
+    source: u8,
+    priority: u8,
+}
+
 impl Ppu {
     pub fn read_register(&mut self, address: u16) -> u8 {
         match address {
@@ -244,7 +251,7 @@ impl Ppu {
         }
     }
 
-    /// Renders the deterministic, non-interlaced Mode 0 main screen.
+    /// Renders a deterministic, non-interlaced frame.
     ///
     /// Mode 0 has four 2bpp backgrounds.  Keeping the renderer pixel based
     /// makes its priority behavior explicit and gives visual tests a stable
@@ -256,68 +263,112 @@ impl Ppu {
         } else {
             backdrop
         });
-        if self.inidisp & 0x80 != 0 || self.bgmode & 0x07 != 0 {
-            if self.inidisp & 0x80 == 0 && self.bgmode & 0x07 == 7 {
-                self.render_mode7(pixels);
-            }
+        if self.inidisp & 0x80 != 0 {
             return;
         }
 
+        match self.bgmode & 0x07 {
+            0 | 1 => self.render_tile_mode(pixels, self.bgmode & 0x07),
+            7 => self.render_mode7(pixels),
+            _ => {}
+        }
+    }
+
+    fn render_tile_mode(&self, pixels: &mut [u32], mode: u8) {
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
-                let mut selected = self.cgram[0];
-                let mut selected_source = 0x20u8; // backdrop
-                let mut selected_priority = 0u8;
-                for &(layer, high) in &[
-                    (3usize, false),
-                    (2, false),
-                    (1, false),
-                    (0, false),
-                    (3, true),
-                    (2, true),
-                    (1, true),
-                    (0, true),
-                ] {
-                    if self.tm & (1 << layer) == 0 {
-                        continue;
-                    }
-                    if self.tmw & (1 << layer) != 0 && self.window_hides(layer, x) {
-                        continue;
-                    }
-                    let (color, tile_priority) = self.bg_pixel(layer, x, y, high);
-                    let priority = self.mode0_bg_priority(layer, tile_priority);
-                    if color != 0 && tile_priority == high && priority > selected_priority {
-                        selected = self.cgram[layer * 32 + usize::from(color)];
-                        selected_source = 1 << layer;
-                        selected_priority = priority;
-                    }
-                }
-
-                // In Mode 0 the four OBJ priorities sit between the low and
-                // high priority background planes.  Resolve OBJ order here
-                // after the background candidate has been selected; lower
-                // OAM indices win ties among sprites of equal priority.
-                if self.tm & 0x10 != 0 {
-                    if let Some((color, priority, _oam_index)) = self.obj_pixel(x, y) {
-                        if priority > selected_priority {
-                            selected = color;
-                            selected_source = 0x10; // OBJ
-                        }
-                    }
-                }
-                let selected = if self.main_color_window_black(x) {
-                    0
-                } else {
-                    selected
-                };
-                pixels[y * SCREEN_WIDTH + x] =
-                    self.color_to_rgba(self.apply_color_math_at(selected, selected_source, x));
+                let main = self.screen_pixel(x, y, mode, self.tm, self.tmw, false);
+                let sub = self.screen_pixel(x, y, mode, self.ts, self.tsw, true);
+                let color = self.compose_screens(main, sub, x);
+                pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
             }
         }
     }
 
-    fn obj_pixel(&self, x: usize, y: usize) -> Option<(u16, u8, usize)> {
-        if self.tmw & 0x10 != 0 && self.window_hides(4, x) {
+    fn screen_pixel(
+        &self,
+        x: usize,
+        y: usize,
+        mode: u8,
+        layer_mask: u8,
+        window_mask: u8,
+        subscreen: bool,
+    ) -> ScreenPixel {
+        let mut selected = ScreenPixel {
+            color: if subscreen {
+                self.fixed_color
+            } else {
+                self.cgram[0]
+            },
+            source: 0x20, // backdrop
+            priority: 0,
+        };
+        let layers = if mode == 1 { 3 } else { 4 };
+        for &(layer, high) in &[
+            (3usize, false),
+            (2, false),
+            (1, false),
+            (0, false),
+            (3, true),
+            (2, true),
+            (1, true),
+            (0, true),
+        ] {
+            if layer >= layers || layer_mask & (1 << layer) == 0 {
+                continue;
+            }
+            if window_mask & (1 << layer) != 0 && self.window_hides(layer, x) {
+                continue;
+            }
+            let (color, tile_priority) = self.bg_pixel_for_mode(layer, x, y, high, mode);
+            let priority = self.bg_priority(mode, layer, tile_priority);
+            if color != 0 && tile_priority == high && priority > selected.priority {
+                let palette_index = if mode == 0 {
+                    layer * 32 + usize::from(color)
+                } else {
+                    usize::from(color)
+                };
+                selected = ScreenPixel {
+                    color: self.cgram[palette_index],
+                    source: 1 << layer,
+                    priority,
+                };
+            }
+        }
+
+        if layer_mask & 0x10 != 0 {
+            if let Some((color, priority, _oam_index)) = self.obj_pixel(x, y, window_mask) {
+                if priority > selected.priority {
+                    selected = ScreenPixel {
+                        color,
+                        source: 0x10,
+                        priority,
+                    };
+                }
+            }
+        }
+        selected
+    }
+
+    fn compose_screens(&self, main: ScreenPixel, sub: ScreenPixel, x: usize) -> u16 {
+        let mut color = if self.main_color_window_applies(x) {
+            0
+        } else {
+            main.color
+        };
+        if self.cgadsub & main.source != 0 && self.color_math_allowed(x) {
+            let operand = if self.cgwsel & 0x02 != 0 {
+                sub.color
+            } else {
+                self.fixed_color
+            };
+            color = self.apply_color_math(color, operand);
+        }
+        color
+    }
+
+    fn obj_pixel(&self, x: usize, y: usize, window_mask: u8) -> Option<(u16, u8, usize)> {
+        if window_mask & 0x10 != 0 && self.window_hides(4, x) {
             return None;
         }
         let mut selected: Option<(u16, u8, usize)> = None;
@@ -416,7 +467,19 @@ impl Ppu {
         SIZES[usize::from((self.obsel >> 5) & 0x07)][usize::from(large)]
     }
 
-    fn mode0_bg_priority(&self, layer: usize, high: bool) -> u8 {
+    fn bg_priority(&self, mode: u8, layer: usize, high: bool) -> u8 {
+        if mode == 1 {
+            return match (layer, high) {
+                (0, true) => 9,
+                (1, true) => 8,
+                (0, false) => 4,
+                (1, false) => 3,
+                (2, true) if self.bgmode & 0x08 != 0 => 13,
+                (2, true) => 2,
+                (2, false) => 1,
+                _ => 0,
+            };
+        }
         match (layer, high) {
             (0, true) => 11, // 1H
             (1, true) => 10, // 2H
@@ -439,7 +502,14 @@ impl Ppu {
         }
     }
 
-    fn bg_pixel(&self, layer: usize, x: usize, y: usize, high: bool) -> (u8, bool) {
+    fn bg_pixel_for_mode(
+        &self,
+        layer: usize,
+        x: usize,
+        y: usize,
+        high: bool,
+        mode: u8,
+    ) -> (u8, bool) {
         let screen = self.bg_screen(layer);
         let scroll_x = usize::from(self.bg_hofs[layer]);
         let scroll_y = usize::from(self.bg_vofs[layer]);
@@ -469,13 +539,19 @@ impl Ppu {
         let tile_base = self.bg_tile_base(layer);
         let row_base = (tile_base + usize::from(entry & 0x03ff) * 16 + row * 2) & 0x7fff;
         let bit = 7 - column;
-        let color = ((self.vram[row_base] >> bit) & 1)
+        let mut color = ((self.vram[row_base] >> bit) & 1)
             | (((self.vram[(row_base + 1) & 0x7fff] >> bit) & 1) << 1);
+        if mode == 1 && layer < 2 {
+            let tile_row_base = tile_base + usize::from(entry & 0x03ff) * 16 + 8 + row * 2;
+            color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 2)
+                | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 3);
+        }
         if color == 0 {
             (0, false)
         } else {
             let palette = usize::from((entry >> 10) & 0x07);
-            ((palette * 4 + usize::from(color)) as u8, high)
+            let palette_width = if mode == 1 && layer < 2 { 16 } else { 4 };
+            ((palette * palette_width + usize::from(color)) as u8, high)
         }
     }
 
@@ -505,12 +581,15 @@ impl Ppu {
         if !self.color_math_allowed(x) {
             return color;
         }
-        let fixed = self.fixed_color;
+        self.apply_color_math(color, self.fixed_color)
+    }
+
+    fn apply_color_math(&self, color: u16, operand: u16) -> u16 {
         let add = self.cgadsub & 0x80 == 0;
         let half = self.cgadsub & 0x40 != 0;
         let channel = |left: u16, right: u16| -> u16 {
             let value = if add {
-                u16::from((left + right).min(31))
+                (left + right).min(31)
             } else {
                 left.saturating_sub(right)
             };
@@ -520,9 +599,9 @@ impl Ppu {
                 value
             }
         };
-        channel(color & 0x1f, fixed & 0x1f)
-            | (channel((color >> 5) & 0x1f, (fixed >> 5) & 0x1f) << 5)
-            | (channel((color >> 10) & 0x1f, (fixed >> 10) & 0x1f) << 10)
+        channel(color & 0x1f, operand & 0x1f)
+            | (channel((color >> 5) & 0x1f, (operand >> 5) & 0x1f) << 5)
+            | (channel((color >> 10) & 0x1f, (operand >> 10) & 0x1f) << 10)
     }
 
     /// Returns whether a configured window hides `layer` at this pixel.
@@ -577,7 +656,7 @@ impl Ppu {
         }
     }
 
-    fn main_color_window_black(&self, x: usize) -> bool {
+    fn main_color_window_applies(&self, x: usize) -> bool {
         let mode = (self.cgwsel >> 6) & 0x03;
         Self::region_applies(mode, self.color_window_region(x))
     }
@@ -622,7 +701,7 @@ impl Ppu {
                     + (usize::try_from(source_x).unwrap_or(0) & 7);
                 let color = (self.vram[pixel_index & 0x7fff] & 0x00ff) as u8;
                 if color != 0 && (self.tmw & 0x01 == 0 || !self.window_hides(0, x)) {
-                    let color = if self.main_color_window_black(x) {
+                    let color = if self.main_color_window_applies(x) {
                         0
                     } else {
                         self.cgram[usize::from(color)]
@@ -752,7 +831,7 @@ mod tests {
 
         assert_eq!(ppu.vram[0], 1);
         assert_eq!(ppu.vram[16], 0x0080);
-        assert_eq!(ppu.bg_pixel(0, 0, 0, false), (1, false));
+        assert_eq!(ppu.bg_pixel_for_mode(0, 0, 0, false, 0), (1, false));
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -861,6 +940,138 @@ mod tests {
 
         assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
         assert_eq!(frame[112 * SCREEN_WIDTH + 128], ppu.color_to_rgba(0x001f));
+    }
+
+    #[test]
+    fn mode_one_renders_bg1_four_bpp_pixels() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 1;
+        ppu.tm = 0x01;
+        ppu.cgram[13] = 0x001f;
+
+        // Map entry 1 selects a 4bpp tile.  All four bitplanes are set for
+        // the first two pixels, producing color 13 (1 + 4 + 8).
+        ppu.vram[0] = 1;
+        ppu.vram[16] = 0x00c0;
+        ppu.vram[24] = 0x00c0;
+        ppu.vram[25] = 0x00c0;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[1], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[8], ppu.color_to_rgba(0));
+    }
+
+    #[test]
+    fn mode_one_renders_bg2_four_bpp_and_bg3_two_bpp_palette_indices() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 1;
+        ppu.bg2sc = 0x04;
+        ppu.bg12nba = 0x10;
+        ppu.bg34nba = 0x01;
+        ppu.cgram[17] = 0x03e0;
+        ppu.vram[0x0400] = 1 | (1 << 10);
+        ppu.vram[0x1010] = 0x0080;
+        ppu.tm = 0x02;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+
+        ppu.bg3sc = 0x08;
+        ppu.bg34nba = 0x01;
+        ppu.cgram[5] = 0x7c00;
+        ppu.vram[0x0800] = 1 | (1 << 10);
+        ppu.vram[0x1010] = 0x0080;
+        ppu.tm = 0x04;
+        frame.fill(0);
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x7c00));
+    }
+
+    #[test]
+    fn mode_one_bg3_priority_bit_moves_high_bg3_above_the_other_backgrounds() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 1;
+        ppu.tm = 0x05;
+        ppu.bg3sc = 0x04;
+        ppu.bg34nba = 0x01;
+        ppu.cgram[1] = 0x001f;
+        ppu.cgram[5] = 0x03e0;
+
+        ppu.vram[0] = 1;
+        ppu.vram[16] = 0x0080;
+        ppu.vram[0x0400] = 1 | (1 << 10) | (1 << 13);
+        ppu.vram[0x1010] = 0x0080;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+
+        ppu.bgmode |= 0x08;
+        frame.fill(0);
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+    }
+
+    #[test]
+    fn subscreen_color_math_uses_ts_and_respects_subscreen_windows() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 1;
+        ppu.tm = 0x01;
+        ppu.ts = 0x02;
+        ppu.bg2sc = 0x04;
+        ppu.bg12nba = 0x10;
+        ppu.cgram[1] = 0x0010;
+        ppu.cgram[17] = 0x000f;
+        ppu.vram[0] = 1;
+        ppu.vram[16] = 0x00c0;
+        ppu.vram[0x0400] = 1 | (1 << 10);
+        ppu.vram[0x1010] = 0x00c0;
+        ppu.cgwsel = 0x02; // Use the subscreen instead of fixed color.
+        ppu.cgadsub = 0x01; // Add BG1 and enable its color math.
+        ppu.cgram[0] = 0x001f;
+        ppu.fixed_color = 0x0003;
+
+        // Hide BG2 from the subscreen at x=0 only.
+        ppu.tsw = 0x02;
+        ppu.w12sel = 0x10;
+        ppu.wh[0] = 0;
+        ppu.wh[1] = 0;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x0013));
+        assert_eq!(frame[1], ppu.color_to_rgba(0x001f));
+    }
+
+    #[test]
+    fn subscreen_color_math_supports_subtraction_and_half_result() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 1;
+        ppu.tm = 0x01;
+        ppu.ts = 0x02;
+        ppu.bg2sc = 0x04;
+        ppu.bg12nba = 0x10;
+        ppu.cgram[1] = 0x001f;
+        ppu.cgram[17] = 0x000f;
+        ppu.vram[0] = 1;
+        ppu.vram[16] = 0x0080;
+        ppu.vram[0x0400] = 1 | (1 << 10);
+        ppu.vram[0x1010] = 0x0080;
+        ppu.cgwsel = 0x02;
+        ppu.cgadsub = 0xc1; // Subtract BG2 from BG1, then halve.
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x0008));
     }
 
     #[test]

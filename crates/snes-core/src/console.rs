@@ -17,6 +17,9 @@ use crate::{
 pub const MASTER_TICKS_PER_FRAME: u64 = 357_366;
 pub const MASTER_TICKS_PER_SCANLINE: u64 = 1_364;
 const NTSC_SCANLINES: u16 = 262;
+const VBLANK_START_SCANLINE: u16 = 225;
+const HBLANK_START_TICK: u64 = 1_096;
+const CPU_IRQ_DISABLE: u8 = 0x04;
 
 /// The complete SNES machine state owned by the core.
 pub struct Console {
@@ -71,12 +74,19 @@ impl Console {
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
             apu: &mut self.apu,
+            timing: &mut self.timing,
         };
         self.cpu.reset_with_bus(&mut bus);
     }
 
     /// Advances one instruction according to the future CPU execution plan.
     pub fn step_instruction(&mut self) -> CpuStep {
+        let pending = self.pending_interrupt();
+        match pending {
+            Some(InterruptKind::Nmi) => self.timing.pending_nmi = false,
+            Some(InterruptKind::Irq) => self.timing.pending_irq = false,
+            Some(InterruptKind::Cop) | None => {}
+        }
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
@@ -84,13 +94,30 @@ impl Console {
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
             apu: &mut self.apu,
+            timing: &mut self.timing,
         };
-        let step = self.cpu.step_with_bus(&mut bus, None);
+        let step = match pending {
+            Some(InterruptKind::Nmi) => {
+                self.cpu
+                    .service_interrupt(&mut bus, InterruptKind::Nmi, None)
+            }
+            Some(InterruptKind::Irq) => {
+                self.cpu
+                    .service_interrupt(&mut bus, InterruptKind::Irq, None)
+            }
+            Some(InterruptKind::Cop) | None => self.cpu.step_with_bus(&mut bus, None),
+        };
         drop(bus);
         self.finish_cpu_step(step)
     }
 
     pub fn step_instruction_traced(&mut self, trace: &mut dyn TraceSink) -> CpuStep {
+        let pending = self.pending_interrupt();
+        match pending {
+            Some(InterruptKind::Nmi) => self.timing.pending_nmi = false,
+            Some(InterruptKind::Irq) => self.timing.pending_irq = false,
+            Some(InterruptKind::Cop) | None => {}
+        }
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
@@ -98,13 +125,29 @@ impl Console {
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
             apu: &mut self.apu,
+            timing: &mut self.timing,
         };
-        let step = self.cpu.step_with_bus(&mut bus, Some(trace));
+        let step = match pending {
+            Some(InterruptKind::Nmi) => {
+                self.cpu
+                    .service_interrupt(&mut bus, InterruptKind::Nmi, Some(trace))
+            }
+            Some(InterruptKind::Irq) => {
+                self.cpu
+                    .service_interrupt(&mut bus, InterruptKind::Irq, Some(trace))
+            }
+            Some(InterruptKind::Cop) | None => self.cpu.step_with_bus(&mut bus, Some(trace)),
+        };
         drop(bus);
         self.finish_cpu_step(step)
     }
 
     pub fn request_interrupt(&mut self, kind: InterruptKind) -> CpuStep {
+        match kind {
+            InterruptKind::Nmi => self.timing.pending_nmi = false,
+            InterruptKind::Irq => self.timing.pending_irq = false,
+            InterruptKind::Cop => {}
+        }
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
@@ -112,10 +155,24 @@ impl Console {
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
             apu: &mut self.apu,
+            timing: &mut self.timing,
         };
         let step = self.cpu.service_interrupt(&mut bus, kind, None);
         drop(bus);
         self.finish_cpu_step(step)
+    }
+
+    fn pending_interrupt(&self) -> Option<InterruptKind> {
+        if self.cpu.state().stopped {
+            return None;
+        }
+        if self.timing.pending_nmi {
+            return Some(InterruptKind::Nmi);
+        }
+        if self.timing.pending_irq && self.cpu.state().status & CPU_IRQ_DISABLE == 0 {
+            return Some(InterruptKind::Irq);
+        }
+        None
     }
 
     fn finish_cpu_step(&mut self, step: CpuStep) -> CpuStep {
@@ -140,6 +197,7 @@ impl Console {
             controller: &mut self.controller,
             dma: None,
             apu: &mut self.apu,
+            timing: &mut self.timing,
         };
         let transfers = dma.execute(pending, &mut bus);
         drop(bus);
@@ -169,20 +227,71 @@ impl Console {
                 controller: &mut self.controller,
                 dma: None,
                 apu: &mut self.apu,
+                timing: &mut self.timing,
             };
             let transfers = dma.run_hdma_scanline(&mut bus);
             drop(bus);
             self.dma = dma;
+            self.update_h_timer(true);
+            let next_scanline = (self.timing.scanline + 1) % NTSC_SCANLINES;
+            self.update_vblank_and_v_timer(next_scanline);
+            self.timing.scanline = next_scanline;
+            self.timing.h_timer_fired = false;
             self.timing.master_ticks = self
                 .timing
                 .master_ticks
                 .saturating_add(u64::from(transfers) * 6);
-            self.timing.scanline = (self.timing.scanline + 1) % NTSC_SCANLINES;
             self.timing.next_hdma_tick = self
                 .timing
                 .next_hdma_tick
                 .checked_add(MASTER_TICKS_PER_SCANLINE)
                 .unwrap_or(u64::MAX);
+        }
+        self.update_h_timer(false);
+    }
+
+    fn update_h_timer(&mut self, force_line_end: bool) {
+        if force_line_end {
+            if !self.timing.h_timer_fired {
+                self.timing.h_timer_fired = true;
+                self.raise_h_timer_irq();
+            }
+            return;
+        }
+
+        let line_start = self
+            .timing
+            .next_hdma_tick
+            .saturating_sub(MASTER_TICKS_PER_SCANLINE);
+        let phase = self.timing.master_ticks.saturating_sub(line_start);
+        if !self.timing.h_timer_fired && phase >= u64::from(self.timing.h_timer) {
+            self.timing.h_timer_fired = true;
+            self.raise_h_timer_irq();
+        }
+    }
+
+    fn raise_h_timer_irq(&mut self) {
+        let mode = (self.timing.nmitimen >> 4) & 0x03;
+        if mode & 0x01 != 0 && (mode & 0x02 == 0 || self.timing.scanline == self.timing.v_timer) {
+            self.timing.timeup = true;
+            self.timing.pending_irq = true;
+        }
+    }
+
+    fn update_vblank_and_v_timer(&mut self, scanline: u16) {
+        if scanline == VBLANK_START_SCANLINE {
+            self.timing.rdnmi = true;
+            if self.timing.nmitimen & 0x80 != 0 {
+                self.timing.pending_nmi = true;
+            }
+        } else if scanline == 0 {
+            self.timing.rdnmi = false;
+        }
+
+        let mode = (self.timing.nmitimen >> 4) & 0x03;
+        if scanline == self.timing.v_timer && mode == 0x02 {
+            self.timing.timeup = true;
+            self.timing.pending_irq = true;
         }
     }
 
@@ -279,6 +388,7 @@ struct ConsoleBus<'a> {
     controller: &'a mut ControllerPorts,
     dma: Option<&'a mut Dma>,
     apu: &'a mut Apu,
+    timing: &'a mut TimingState,
 }
 
 impl CpuBus for ConsoleBus<'_> {
@@ -295,6 +405,9 @@ impl CpuBus for ConsoleBus<'_> {
         }
         if let Some(port) = apu_port(raw) {
             return self.apu.read_cpu_port(port);
+        }
+        if let Some(register) = timing_register(raw) {
+            return self.timing.read_register(register);
         }
         if let Some(register) = dma_register(raw) {
             return self
@@ -317,6 +430,8 @@ impl CpuBus for ConsoleBus<'_> {
             }
         } else if let Some(port) = apu_port(raw) {
             self.apu.write_cpu_port(port, value);
+        } else if let Some(register) = timing_register(raw) {
+            self.timing.write_register(register, value);
         } else if let Some(register) = dma_register(raw) {
             if let Some(dma) = self.dma.as_deref_mut() {
                 dma.write_register(register, value);
@@ -325,6 +440,12 @@ impl CpuBus for ConsoleBus<'_> {
             self.cartridge.write(address, value);
         }
     }
+}
+
+fn timing_register(address: u32) -> Option<u16> {
+    let offset = address & 0xffff;
+    (is_system_bank(address) && matches!(offset, 0x4200 | 0x4207..=0x420a | 0x4210..=0x4212))
+        .then_some(offset as u16)
 }
 
 fn is_system_bank(address: u32) -> bool {
@@ -396,6 +517,14 @@ pub struct TimingState {
     pub master_ticks: u64,
     pub scanline: u16,
     pub next_hdma_tick: u64,
+    pub nmitimen: u8,
+    pub rdnmi: bool,
+    pub timeup: bool,
+    pub h_timer: u16,
+    pub v_timer: u16,
+    pub pending_nmi: bool,
+    pub pending_irq: bool,
+    pub h_timer_fired: bool,
 }
 
 impl Default for TimingState {
@@ -404,6 +533,67 @@ impl Default for TimingState {
             master_ticks: 0,
             scanline: 0,
             next_hdma_tick: MASTER_TICKS_PER_SCANLINE,
+            nmitimen: 0,
+            rdnmi: false,
+            timeup: false,
+            h_timer: 0,
+            v_timer: 0,
+            pending_nmi: false,
+            pending_irq: false,
+            h_timer_fired: false,
+        }
+    }
+}
+
+impl TimingState {
+    fn read_register(&mut self, address: u16) -> u8 {
+        match address {
+            0x4200 => self.nmitimen,
+            0x4207 => self.h_timer as u8,
+            0x4208 => (self.h_timer >> 8) as u8,
+            0x4209 => self.v_timer as u8,
+            0x420a => (self.v_timer >> 8) as u8,
+            0x4210 => {
+                let value = (if self.rdnmi { 0x80 } else { 0 }) | 2;
+                self.rdnmi = false;
+                value
+            }
+            0x4211 => {
+                let value = if self.timeup { 0x80 } else { 0 };
+                self.timeup = false;
+                self.pending_irq = false;
+                value
+            }
+            0x4212 => {
+                let line_start = self
+                    .next_hdma_tick
+                    .saturating_sub(MASTER_TICKS_PER_SCANLINE);
+                let phase = self.master_ticks.saturating_sub(line_start);
+                let hblank = phase >= HBLANK_START_TICK;
+                (if self.scanline >= VBLANK_START_SCANLINE {
+                    0x80
+                } else {
+                    0
+                }) | if hblank { 0x40 } else { 0 }
+            }
+            _ => 0,
+        }
+    }
+
+    fn write_register(&mut self, address: u16, value: u8) {
+        match address {
+            0x4200 => {
+                let old_nmi_enabled = self.nmitimen & 0x80 != 0;
+                self.nmitimen = value;
+                if !old_nmi_enabled && value & 0x80 != 0 && self.rdnmi {
+                    self.pending_nmi = true;
+                }
+            }
+            0x4207 => self.h_timer = (self.h_timer & 0x100) | u16::from(value),
+            0x4208 => self.h_timer = (self.h_timer & 0xff) | (u16::from(value & 1) << 8),
+            0x4209 => self.v_timer = (self.v_timer & 0x100) | u16::from(value),
+            0x420a => self.v_timer = (self.v_timer & 0xff) | (u16::from(value & 1) << 8),
+            _ => {}
         }
     }
 }
@@ -470,6 +660,7 @@ mod tests {
             controller: &mut controller,
             dma: Some(&mut dma),
             apu: &mut apu,
+            timing: &mut TimingState::default(),
         };
 
         // WRAM, PPU, APU, controller, and DMA all win in the system banks.
@@ -522,6 +713,7 @@ mod tests {
             controller: &mut controller,
             dma: None,
             apu: &mut apu,
+            timing: &mut TimingState::default(),
         };
 
         assert_eq!(bus.read(Address24::new(0x00420c)), 0);
@@ -574,6 +766,7 @@ mod tests {
             master_ticks: MASTER_TICKS_PER_SCANLINE * 17 + 9,
             scanline: 17,
             next_hdma_tick: MASTER_TICKS_PER_SCANLINE * 18,
+            ..TimingState::default()
         };
         console.dma.hdma_channels[2] = crate::dma::HdmaChannelState {
             table_address: 0x3456,
@@ -637,9 +830,158 @@ mod tests {
             controller: &mut console.controller,
             dma: Some(&mut console.dma),
             apu: &mut console.apu,
+            timing: &mut console.timing,
         };
         bus.write(Address24::new(0x000123), 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x7e0123)), 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x800123)), 0xa5);
+    }
+
+    #[test]
+    fn timing_registers_route_before_dma_and_status_reads_clear_latches() {
+        let mut console = Console::new(RomImage::new(vec![0xea; 8])).unwrap();
+        console.timing.rdnmi = true;
+        console.timing.timeup = true;
+        let mut bus = ConsoleBus {
+            wram: &mut console.wram,
+            cartridge: &mut *console.cartridge,
+            ppu: &mut console.ppu,
+            controller: &mut console.controller,
+            dma: Some(&mut console.dma),
+            apu: &mut console.apu,
+            timing: &mut console.timing,
+        };
+
+        bus.write(Address24::new(0x004200), 0xb1);
+        bus.write(Address24::new(0x004207), 0x34);
+        bus.write(Address24::new(0x804208), 0x01);
+        bus.write(Address24::new(0x004209), 0x56);
+        bus.write(Address24::new(0x00420a), 0x01);
+        assert_eq!(bus.read(Address24::new(0x004200)), 0xb1);
+        assert_eq!(bus.read(Address24::new(0x804207)), 0x34);
+        assert_eq!(bus.read(Address24::new(0x004208)), 0x01);
+        assert_eq!(bus.read(Address24::new(0x004209)), 0x56);
+        assert_eq!(bus.read(Address24::new(0x00420a)), 0x01);
+
+        assert_eq!(bus.read(Address24::new(0x004210)) & 0x80, 0x80);
+        assert_eq!(bus.read(Address24::new(0x804210)) & 0x80, 0);
+        assert_eq!(bus.read(Address24::new(0x004211)) & 0x80, 0x80);
+        assert_eq!(bus.read(Address24::new(0x004211)) & 0x80, 0);
+    }
+
+    #[test]
+    fn hvbjoy_reports_hblank_and_vblank_from_scanline_scheduler() {
+        let mut console = Console::new(RomImage::new(vec![0xea; 8])).unwrap();
+        console.timing.master_ticks = HBLANK_START_TICK - 1;
+        let mut bus = ConsoleBus {
+            wram: &mut console.wram,
+            cartridge: &mut *console.cartridge,
+            ppu: &mut console.ppu,
+            controller: &mut console.controller,
+            dma: Some(&mut console.dma),
+            apu: &mut console.apu,
+            timing: &mut console.timing,
+        };
+
+        assert_eq!(bus.read(Address24::new(0x004212)) & 0x40, 0);
+        drop(bus);
+        console.timing.master_ticks = HBLANK_START_TICK;
+        let mut bus = ConsoleBus {
+            wram: &mut console.wram,
+            cartridge: &mut *console.cartridge,
+            ppu: &mut console.ppu,
+            controller: &mut console.controller,
+            dma: Some(&mut console.dma),
+            apu: &mut console.apu,
+            timing: &mut console.timing,
+        };
+        assert_eq!(bus.read(Address24::new(0x804212)) & 0x40, 0x40);
+        drop(bus);
+
+        console.timing.scanline = VBLANK_START_SCANLINE;
+        let mut bus = ConsoleBus {
+            wram: &mut console.wram,
+            cartridge: &mut *console.cartridge,
+            ppu: &mut console.ppu,
+            controller: &mut console.controller,
+            dma: Some(&mut console.dma),
+            apu: &mut console.apu,
+            timing: &mut console.timing,
+        };
+        assert_eq!(bus.read(Address24::new(0x004212)) & 0x80, 0x80);
+    }
+
+    #[test]
+    fn vblank_sets_rdnmi_and_services_enabled_nmi_on_next_instruction() {
+        let mut rom = vec![0xea; 0x8000];
+        rom[0x7ffa] = 0x34;
+        rom[0x7ffb] = 0x12;
+        rom[0x7ffc] = 0x00;
+        rom[0x7ffd] = 0x80;
+        let mut console = Console::new(RomImage::new(rom)).unwrap();
+        console.reset();
+        console.timing.nmitimen = 0x80;
+        console.timing.scanline = VBLANK_START_SCANLINE - 1;
+        console.timing.master_ticks = MASTER_TICKS_PER_SCANLINE * u64::from(VBLANK_START_SCANLINE);
+        console.timing.next_hdma_tick = console.timing.master_ticks;
+
+        console.run_hdma_boundaries();
+
+        assert!(console.timing.rdnmi);
+        assert!(console.timing.pending_nmi);
+        console.step_instruction();
+        assert_eq!(console.cpu.state().pc, 0x1234);
+        assert!(!console.timing.pending_nmi);
+    }
+
+    #[test]
+    fn h_timer_raises_irq_only_after_h_counter_target_and_respects_i_flag() {
+        let mut rom = vec![0xea; 0x8000];
+        rom[0x7ffe] = 0x78;
+        rom[0x7fff] = 0x56;
+        rom[0x7ffc] = 0x00;
+        rom[0x7ffd] = 0x80;
+        let mut console = Console::new(RomImage::new(rom)).unwrap();
+        console.reset();
+        console.timing.nmitimen = 0x10;
+        console.timing.h_timer = 100;
+        console.timing.master_ticks = 99;
+        console.timing.h_timer_fired = false;
+        console.run_hdma_boundaries();
+        assert!(!console.timing.timeup);
+
+        console.timing.master_ticks = 100;
+        console.run_hdma_boundaries();
+        assert!(console.timing.timeup);
+        assert!(console.timing.pending_irq);
+
+        // The reset I flag masks the request; clearing it lets the existing
+        // Cpu65816 interrupt-entry API service the latched IRQ.
+        let mut cpu_state = console.cpu.state();
+        cpu_state.status &= !CPU_IRQ_DISABLE;
+        console.cpu.restore(cpu_state);
+        console.step_instruction();
+        assert_eq!(console.cpu.state().pc, 0x5678);
+        assert!(!console.timing.pending_irq);
+    }
+
+    #[test]
+    fn interrupt_latches_are_part_of_snapshot_determinism() {
+        let mut console = Console::new(RomImage::new(vec![0xea; 8])).unwrap();
+        console.timing = TimingState {
+            nmitimen: 0xb0,
+            rdnmi: true,
+            timeup: true,
+            h_timer: 123,
+            v_timer: 45,
+            pending_nmi: true,
+            pending_irq: true,
+            h_timer_fired: true,
+            ..TimingState::default()
+        };
+        let snapshot = console.snapshot();
+        console.timing = TimingState::default();
+        console.restore(&snapshot).unwrap();
+        assert_eq!(console.timing, snapshot.timing);
     }
 }
