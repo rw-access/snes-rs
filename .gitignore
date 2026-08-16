@@ -8,6 +8,7 @@ Cargo.lock
 /tests/snes-test-roms/*
 !/tests/snes-test-roms/README.md
 !/tests/snes-test-roms/sources.json
+!/tests/snes-test-roms/cases.toml
 /tests/fixtures/generated/
 
 # Editor and operating-system files.

@@ -1,7 +1,8 @@
 # Optional SNES test-ROM corpus
 
-The repository tracks only [sources.json](sources.json), which records the
-upstream URLs and immutable commits used for the initial corpus. ROMs, JSON
+The repository tracks [sources.json](sources.json), which records the upstream
+URLs and immutable commits used for the initial corpus, and
+[cases.toml](cases.toml), which records explicit acceptance cases. ROMs, JSON
 vectors, screenshots, and Git caches are generated locally and are ignored by
 Git. Ordinary `cargo test --workspace` commands do not read this directory or
 access the network.
@@ -64,6 +65,36 @@ repository, update only `sources.json`, run `--verify-only`, and record the
 reason/date in the change description. Do not replace an immutable commit with
 a moving branch name.
 
+## Acceptance descriptors and runner
+
+Validate descriptor provenance without network access:
+
+```sh
+python3 scripts/verify_snes_acceptance.py
+```
+
+After materializing the corpus, enable only cases whose oracle is understood,
+then run the opt-in harness from the repository root:
+
+```sh
+cargo run -p snes-render --bin snes-acceptance
+cargo run -p snes-render --bin snes-acceptance -- --case peterlemon-cpuadc
+```
+
+Each case records its source ID, immutable source revision, ROM SHA-256,
+execution bound, capture frame, reference dimensions/format, tolerance, mask,
+and artifact name. A strict case exits nonzero on a missing reference or frame
+mismatch. A diagnostic-only case records a capture but does not turn an
+unsupported reference format into a correctness claim. Artifacts are written
+under `target/snes-acceptance/<case>/` as lossless PPM plus metadata and, on a
+mismatch, a deterministic PPM diff.
+
+The harness currently decodes binary P6 PPM and little-endian ARGB32 reference
+files. The pinned corpus's PNG/JPEG captures are retained as provenance and are
+diagnostic-only until an image decoder is deliberately added; their checksums
+are still verified. `--case` may explicitly run a disabled diagnostic case
+without changing its manifest status.
+
 ## Provenance and legal assumptions
 
 These upstream projects are public repositories, but their ROMs, screenshots,
@@ -93,7 +124,7 @@ The corpus also contains `.spc`, `.bin`, source, and standalone image files.
 Those are fixtures for a future subsystem harness, not bootable SNES ROM cases.
 Only files with an explicit descriptor should enter an automated suite.
 
-The current diagnostic command is:
+The existing bounded diagnostic command is:
 
 ```sh
 cargo run -p snes-render --bin snes-test -- \
@@ -102,14 +133,12 @@ cargo run -p snes-render --bin snes-test -- \
 
 Its `ticks=... stopped=...` output proves only that loading and bounded
 execution completed. `stopped=true` is not a correctness result, and
-`stopped=false` is not a failure. The command does not capture a frame, compare
-an image, inspect a result sentinel, or run the SingleStepTests vectors. The
-limit is instruction/DMA-granular, so the reported tick count may exceed the
-requested bound; a future gate must define the allowed overshoot. The current
-CLI also does not provide a complete nonzero-on-failure result protocol, and
-the runner's mapping descriptor is not yet an applied mapping override. Until
-those oracles and protocols are implemented, no external-ROM pass claim should
-be made.
+`stopped=false` is not a failure. It does not capture a frame or compare an
+image. Use `snes-acceptance` for descriptor-driven frame oracles; it still does
+not run the SingleStepTests JSON vectors. The limit is instruction/DMA-
+granular, so the reported tick count may exceed the requested bound and is
+reported as evidence, not as a cycle-accuracy result. The runner's mapping
+descriptor is not yet an applied mapping override.
 
 ## Visual case record
 
@@ -123,8 +152,8 @@ harness rather than inferred from filenames, containing:
 - whether the result is a strict gate or diagnostic-only, with the reason;
 - the artifact path for actual and diff images on failure.
 
-For deterministic PNG cases, the default gate is exact dimensions and zero
-per-channel tolerance. Any relaxation must be justified in the descriptor.
-JPEG references, converted captures, and documented glitch cases stay
-diagnostic until their tolerance and mask are reproducible. A ROM reaching a
-stop instruction is never a substitute for this frame comparison.
+For deterministic lossless cases, the default gate is exact dimensions and
+zero per-channel tolerance. Any relaxation must be justified in the descriptor.
+PNG/JPEG references, converted captures, and documented glitch cases stay
+diagnostic until their format and tolerance/mask are reproducible. A ROM
+reaching a stop instruction is never a substitute for this frame comparison.

@@ -721,6 +721,64 @@ impl Cpu65816 {
                 }
                 cycles = 6;
             }
+            0x03 | 0x23 | 0x43 | 0x63 | 0xa3 | 0xc3 | 0xe3 => {
+                let address = self.stack_relative_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                match opcode {
+                    0x03 => self.logic_acc(value, |lhs, rhs| lhs | rhs),
+                    0x23 => self.logic_acc(value, |lhs, rhs| lhs & rhs),
+                    0x43 => self.logic_acc(value, |lhs, rhs| lhs ^ rhs),
+                    0x63 => self.adc(value),
+                    0xa3 => self.set_accumulator(value),
+                    0xc3 => self.compare(self.state.a, value, self.accumulator_is_8_bit()),
+                    0xe3 => self.sbc(value),
+                    _ => unreachable!("unhandled stack-relative opcode {opcode:02x}"),
+                }
+                cycles = 4;
+            }
+            0x13 | 0x33 | 0x53 | 0x73 | 0xb3 | 0xd3 | 0xf3 => {
+                let address = self.stack_relative_indirect_y_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                match opcode {
+                    0x13 => self.logic_acc(value, |lhs, rhs| lhs | rhs),
+                    0x33 => self.logic_acc(value, |lhs, rhs| lhs & rhs),
+                    0x53 => self.logic_acc(value, |lhs, rhs| lhs ^ rhs),
+                    0x73 => self.adc(value),
+                    0xb3 => self.set_accumulator(value),
+                    0xd3 => self.compare(self.state.a, value, self.accumulator_is_8_bit()),
+                    0xf3 => self.sbc(value),
+                    _ => unreachable!("unhandled stack-relative indirect opcode {opcode:02x}"),
+                }
+                cycles = 7;
+            }
             0x15 | 0x35 | 0x55 | 0x75 | 0xd5 | 0xf5 | 0x1d | 0x3d | 0x5d | 0x7d | 0xdd
             | 0xfd | 0x19 | 0x39 | 0x59 | 0x79 | 0xd9 | 0xf9 | 0x1f | 0x3f | 0x5f | 0x7f
             | 0xdf | 0xff => {
@@ -1141,6 +1199,44 @@ impl Cpu65816 {
                     &mut access_count,
                 );
                 cycles = 3;
+            }
+            0x83 => {
+                let address = self.stack_relative_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.write_value(
+                    bus,
+                    address,
+                    self.state.a,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                cycles = 4;
+            }
+            0x93 => {
+                let address = self.stack_relative_indirect_y_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.write_value(
+                    bus,
+                    address,
+                    self.state.a,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                cycles = 7;
             }
             0xa4 | 0xa6 => {
                 let address = self.direct_address(
@@ -2243,6 +2339,52 @@ impl Cpu65816 {
         )
     }
 
+    fn stack_relative_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        Address24::new(u32::from(self.state.sp.wrapping_add(u16::from(offset))))
+    }
+
+    fn stack_relative_indirect_y_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        let pointer = self.state.sp.wrapping_add(u16::from(offset));
+        let low = self.read(
+            bus,
+            Address24::new(u32::from(pointer)),
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        let high = self.read(
+            bus,
+            Address24::new(u32::from(pointer.wrapping_add(1))),
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        Address24::new(
+            (u32::from(self.state.data_bank) << 16)
+                | u32::from(u16::from_le_bytes([low, high]).wrapping_add(self.state.y)),
+        )
+    }
+
     fn long_address(
         &mut self,
         bus: &mut dyn CpuBus,
@@ -2814,5 +2956,36 @@ mod tests {
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().pc, 0x9000);
         assert_eq!(bus.memory[0x01fd], 0x34);
+    }
+
+    #[test]
+    fn stack_relative_load_store_families_use_sp_and_y() {
+        let mut bus = FlatBus::new();
+        bus.memory[..8].copy_from_slice(&[
+            0xa9, 0x42, // LDA #$42
+            0x83, 0x02, // STA $02,S
+            0xa9, 0x00, // LDA #$00
+            0xb3, 0x00, // LDA ($00,S),Y
+        ]);
+        bus.memory[0x01f0] = 0x00;
+        bus.memory[0x01f1] = 0x20;
+        bus.memory[0x002001] = 0x77;
+        let mut cpu = Cpu65816::default();
+        cpu.state.sp = 0x01f0;
+        cpu.state.y = 1;
+
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(bus.memory[0x01f2], 0x42);
+        cpu.step_with_bus(&mut bus, None);
+        let mut trace = crate::VecTrace::default();
+        cpu.step_with_bus(&mut bus, Some(&mut trace));
+        assert_eq!(
+            trace.as_slice().last().map(|access| access.address),
+            Some(Address24::new(0x002001))
+        );
+        assert_eq!(trace.as_slice().last().and_then(|access| access.value), Some(0x77));
+        assert_eq!(bus.memory[0x2001], 0x77);
+        assert_eq!(cpu.state().a & 0xff, 0x77);
     }
 }

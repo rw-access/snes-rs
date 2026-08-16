@@ -8,8 +8,9 @@ pub const SCREEN_HEIGHT: usize = 224;
 ///
 /// This deliberately models the ordinary background path first.  The state is
 /// complete enough for deterministic register tests and for simple Mode 0
-/// diagnostic ROMs; sprite, window, color math, and Mode 7 behavior are added
-/// as separate increments.
+/// diagnostic ROMs.  Sprite composition is also modeled for the ordinary
+/// non-interlaced path; scanline limits and timing are intentionally outside
+/// this renderer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ppu {
     pub inidisp: u8,
@@ -73,6 +74,19 @@ impl Default for Ppu {
             bg_offset_latches: [None; 8],
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OamSprite {
+    x: i16,
+    y: u8,
+    tile: u8,
+    palette: u8,
+    priority: u8,
+    name_select: bool,
+    h_flip: bool,
+    v_flip: bool,
+    size_large: bool,
 }
 
 impl Ppu {
@@ -198,28 +212,165 @@ impl Ppu {
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
                 let mut selected = self.cgram[0];
+                let mut selected_source = 0x20u8; // backdrop
                 let mut selected_priority = 0u8;
-                for &(layer, high, priority) in &[
-                    (3usize, false, 1u8),
-                    (2, false, 2),
-                    (1, false, 3),
-                    (0, false, 4),
-                    (3, true, 5),
-                    (2, true, 6),
-                    (1, true, 7),
-                    (0, true, 8),
+                for &(layer, high) in &[
+                    (3usize, false),
+                    (2, false),
+                    (1, false),
+                    (0, false),
+                    (3, true),
+                    (2, true),
+                    (1, true),
+                    (0, true),
                 ] {
                     if self.tm & (1 << layer) == 0 {
                         continue;
                     }
                     let (color, tile_priority) = self.bg_pixel(layer, x, y, high);
-                    if color != 0 && tile_priority == high && priority >= selected_priority {
+                    let priority = self.mode0_bg_priority(layer, tile_priority);
+                    if color != 0 && tile_priority == high && priority > selected_priority {
                         selected = self.cgram[layer * 32 + usize::from(color)];
+                        selected_source = 1 << layer;
                         selected_priority = priority;
                     }
                 }
-                pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(self.apply_color_math(selected));
+
+                // In Mode 0 the four OBJ priorities sit between the low and
+                // high priority background planes.  Resolve OBJ order here
+                // after the background candidate has been selected; lower
+                // OAM indices win ties among sprites of equal priority.
+                if self.tm & 0x10 != 0 {
+                    if let Some((color, priority, _oam_index)) = self.obj_pixel(x, y) {
+                        if priority > selected_priority {
+                            selected = color;
+                            selected_source = 0x10; // OBJ
+                        }
+                    }
+                }
+                pixels[y * SCREEN_WIDTH + x] =
+                    self.color_to_rgba(self.apply_color_math(selected, selected_source));
             }
+        }
+    }
+
+    fn obj_pixel(&self, x: usize, y: usize) -> Option<(u16, u8, usize)> {
+        let mut selected: Option<(u16, u8, usize)> = None;
+        for index in 0..128 {
+            let sprite = self.decode_sprite(index);
+            let (width, height) = self.obj_dimensions(sprite.size_large);
+            let local_x = x as i16 - sprite.x;
+            if local_x < 0 || local_x >= width as i16 {
+                continue;
+            }
+
+            // OAM Y coordinates wrap at 256.  This also makes sprites whose
+            // bottom crosses the visible region deterministic without trying
+            // to model the PPU's per-scanline evaluation limits.
+            let local_y = (y as i16 - i16::from(sprite.y)).rem_euclid(256) as usize;
+            if local_y >= height {
+                continue;
+            }
+
+            let draw_x = if sprite.h_flip {
+                width - 1 - local_x as usize
+            } else {
+                local_x as usize
+            };
+            let draw_y = if sprite.v_flip {
+                height - 1 - local_y
+            } else {
+                local_y
+            };
+            let tile_x = draw_x / 8;
+            let tile_y = draw_y / 8;
+            let tile = sprite.tile.wrapping_add((tile_x + tile_y * 16) as u8);
+            let row = draw_y & 7;
+            let column = draw_x & 7;
+            let name_select = usize::from((self.obsel >> 3) & 0x03) << 12;
+            let table_base = usize::from(self.obsel & 0x07) << 13;
+            let table_base = table_base + if sprite.name_select { name_select } else { 0 };
+            let tile_base = (table_base + usize::from(tile) * 16) & 0x7fff;
+            let row_base = (tile_base + row * 2) & 0x7fff;
+            let bit = 7 - column;
+            let color = ((self.vram[row_base] >> bit) & 1)
+                | (((self.vram[(row_base + 1) & 0x7fff] >> bit) & 1) << 1)
+                | (((self.vram[(tile_base + 8 + row * 2) & 0x7fff] >> bit) & 1) << 2)
+                | (((self.vram[(tile_base + 8 + row * 2 + 1) & 0x7fff] >> bit) & 1) << 3);
+            if color == 0 {
+                continue;
+            }
+
+            let priority = Self::mode0_obj_priority(sprite.priority);
+            let palette = usize::from(sprite.palette);
+            let rgba_color = self.cgram[128 + palette * 16 + usize::from(color)];
+            match selected {
+                Some((_, old_priority, old_index))
+                    if old_priority > priority
+                        || (old_priority == priority && old_index < index) => {}
+                _ => selected = Some((rgba_color, priority, index)),
+            }
+        }
+        selected
+    }
+
+    fn decode_sprite(&self, index: usize) -> OamSprite {
+        let base = index * 4;
+        let x_low = u16::from(self.oam[base]);
+        let y = self.oam[base + 1];
+        let tile = self.oam[base + 2];
+        let attributes = self.oam[base + 3];
+        let high = self.oam[512 + index / 4];
+        let shift = (index % 4) * 2;
+        let x = x_low | (u16::from((high >> shift) & 1) << 8);
+        OamSprite {
+            x: if x >= 256 { x as i16 - 512 } else { x as i16 },
+            y,
+            tile,
+            palette: (attributes >> 1) & 0x07,
+            priority: (attributes >> 4) & 0x03,
+            name_select: attributes & 1 != 0,
+            h_flip: attributes & 0x40 != 0,
+            v_flip: attributes & 0x80 != 0,
+            size_large: high >> shift & 0x02 != 0,
+        }
+    }
+
+    fn obj_dimensions(&self, large: bool) -> (usize, usize) {
+        // OBSEL bits 5-7 select the pair of ordinary/large OBJ sizes.
+        const SIZES: [[(usize, usize); 2]; 8] = [
+            [(8, 8), (16, 16)],
+            [(8, 8), (32, 32)],
+            [(8, 8), (64, 64)],
+            [(16, 16), (32, 32)],
+            [(16, 16), (64, 64)],
+            [(32, 32), (64, 64)],
+            [(16, 32), (32, 64)],
+            [(16, 32), (32, 32)],
+        ];
+        SIZES[usize::from((self.obsel >> 5) & 0x07)][usize::from(large)]
+    }
+
+    fn mode0_bg_priority(&self, layer: usize, high: bool) -> u8 {
+        match (layer, high) {
+            (0, true) => 11, // 1H
+            (1, true) => 10, // 2H
+            (0, false) => 8, // 1L
+            (1, false) => 7, // 2L
+            (2, true) => 5,  // 3H
+            (3, true) => 4,  // 4H
+            (2, false) => 2, // 3L
+            (3, false) => 1, // 4L
+            _ => 0,
+        }
+    }
+
+    fn mode0_obj_priority(priority: u8) -> u8 {
+        match priority {
+            3 => 12, // S3
+            2 => 9,  // S2
+            1 => 6,  // S1
+            _ => 3,  // S0
         }
     }
 
@@ -282,8 +433,8 @@ impl Ppu {
         usize::from(nibble) << 12
     }
 
-    fn apply_color_math(&self, color: u16) -> u16 {
-        if self.cgadsub & 0x20 == 0 {
+    fn apply_color_math(&self, color: u16, source: u8) -> u16 {
+        if self.cgadsub & source == 0 {
             return color;
         }
         let fixed = self.fixed_color;
@@ -409,13 +560,89 @@ mod tests {
     }
 
     #[test]
+    fn oam_decodes_extended_position_size_and_attributes() {
+        let mut ppu = Ppu::default();
+        ppu.oam[0] = 0x05;
+        ppu.oam[1] = 0x17;
+        ppu.oam[2] = 0x23;
+        ppu.oam[3] = 0x71; // palette 0, priority 3, name select, h-flip
+        ppu.oam[512] = 0x03; // X high bit and large-size bit for sprite 0.
+        ppu.obsel = 0xa0; // 64x64 large size pair.
+
+        let sprite = ppu.decode_sprite(0);
+        assert_eq!(sprite.x, -251);
+        assert_eq!(sprite.y, 0x17);
+        assert_eq!(sprite.tile, 0x23);
+        assert_eq!(sprite.palette, 0);
+        assert_eq!(sprite.priority, 3);
+        assert!(sprite.name_select);
+        assert!(sprite.h_flip);
+        assert!(!sprite.v_flip);
+        assert!(sprite.size_large);
+        assert_eq!(ppu.obj_dimensions(true), (64, 64));
+    }
+
+    #[test]
+    fn mode_zero_renders_four_bpp_obj_and_h_flip() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x10; // OBJ only.
+        ppu.cgram[128 + 1] = 0x001f;
+        ppu.cgram[128 + 2] = 0x03e0;
+
+        // An 8x8 OBJ tile with color 1 at the left edge and color 2 at the
+        // right edge, using the two low bitplanes in the first row.
+        ppu.vram[0] = 0x0080;
+        ppu.vram[1] = 0x0001;
+        ppu.oam[0..4].copy_from_slice(&[10, 20, 0, 0]);
+        ppu.oam[512] = 0;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[20 * SCREEN_WIDTH + 10], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[20 * SCREEN_WIDTH + 17], ppu.color_to_rgba(0x03e0));
+
+        ppu.oam[3] = 0x40; // horizontal flip
+        frame.fill(0);
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[20 * SCREEN_WIDTH + 10], ppu.color_to_rgba(0x03e0));
+        assert_eq!(frame[20 * SCREEN_WIDTH + 17], ppu.color_to_rgba(0x001f));
+    }
+
+    #[test]
+    fn mode_zero_obj_priority_sits_below_high_background() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x11; // BG1 and OBJ.
+        ppu.bg1sc = 0x04; // Keep the BG map away from the OBJ tile at VRAM 0.
+        ppu.cgram[1] = 0x7c00;
+        ppu.cgram[128 + 1] = 0x001f;
+
+        // BG1 high-priority color 1 at the origin.
+        ppu.vram[16] = 0x0080;
+        ppu.vram[0x400] = 1 | (1 << 13);
+        // OBJ color 1 at the same screen pixel, with the lowest OBJ priority
+        // so that the high BG1 plane remains in front of it.
+        ppu.vram[0] = 0x0080;
+        ppu.vram[1] = 0;
+        ppu.vram[8] = 0;
+        ppu.vram[9] = 0;
+        ppu.oam[0..4].copy_from_slice(&[0, 0, 0, 0x00]);
+        ppu.oam[512] = 0;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x7c00));
+    }
+
+    #[test]
     fn fixed_color_math_adds_selected_channels() {
         let mut ppu = Ppu::default();
         ppu.cgadsub = 0x20;
         ppu.fixed_color = 0x0010;
-        assert_eq!(ppu.apply_color_math(0x0010), 0x001f);
+        assert_eq!(ppu.apply_color_math(0x0010, 0x20), 0x001f);
 
         ppu.cgadsub = 0xa0;
-        assert_eq!(ppu.apply_color_math(0x0010), 0);
+        assert_eq!(ppu.apply_color_math(0x0010, 0x20), 0);
     }
 }

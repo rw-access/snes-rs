@@ -218,6 +218,40 @@ impl Spc700 {
                 self.sbc(ram[usize::from(self.direct_address(self.x))]);
                 3
             }
+            0x07 | 0x27 | 0x47 | 0x67 | 0x87 | 0xa7 => {
+                let address = self.fetch_indirect_indexed_address(ram, self.x);
+                let value = ram[usize::from(address)];
+                match opcode {
+                    0x07 => self.a |= value,
+                    0x27 => self.a &= value,
+                    0x47 => self.a ^= value,
+                    0x67 => self.compare(self.a, value),
+                    0x87 => self.adc(value),
+                    0xa7 => self.sbc(value),
+                    _ => unreachable!(),
+                }
+                if !matches!(opcode, 0x67 | 0x87 | 0xa7) {
+                    self.set_zero_negative(self.a);
+                }
+                6
+            }
+            0x17 | 0x37 | 0x57 | 0x77 | 0x97 | 0xb7 => {
+                let address = self.fetch_direct_indirect_y_address(ram);
+                let value = ram[usize::from(address)];
+                match opcode {
+                    0x17 => self.a |= value,
+                    0x37 => self.a &= value,
+                    0x57 => self.a ^= value,
+                    0x77 => self.compare(self.a, value),
+                    0x97 => self.adc(value),
+                    0xb7 => self.sbc(value),
+                    _ => unreachable!(),
+                }
+                if !matches!(opcode, 0x77 | 0x97 | 0xb7) {
+                    self.set_zero_negative(self.a);
+                }
+                6
+            }
             0x20 => {
                 self.psw &= !0x20;
                 2
@@ -287,11 +321,22 @@ impl Spc700 {
                 ram[usize::from(address)] = self.a;
                 3
             }
+            0xc7 => {
+                let address = self.fetch_indirect_indexed_address(ram, self.x);
+                ram[usize::from(address)] = self.a;
+                7
+            }
             0xe6 => {
                 let address = self.direct_address(self.x);
                 self.a = ram[usize::from(address)];
                 self.set_zero_negative(self.a);
                 3
+            }
+            0xe7 => {
+                let address = self.fetch_indirect_indexed_address(ram, self.x);
+                self.a = ram[usize::from(address)];
+                self.set_zero_negative(self.a);
+                6
             }
             0xd4 => {
                 let address = self.direct_indexed_address(ram, self.x);
@@ -496,6 +541,23 @@ impl Spc700 {
         ram[usize::from(address)]
     }
 
+    fn fetch_indirect_indexed_address(&mut self, ram: &[u8; 65_536], index: u8) -> u16 {
+        let operand = self.fetch(ram);
+        let pointer = self.direct_address(operand.wrapping_add(index));
+        let low = ram[usize::from(pointer)];
+        let high =
+            ram[usize::from(self.direct_address(operand.wrapping_add(index).wrapping_add(1)))];
+        u16::from_le_bytes([low, high])
+    }
+
+    fn fetch_direct_indirect_y_address(&mut self, ram: &[u8; 65_536]) -> u16 {
+        let operand = self.fetch(ram);
+        let pointer = self.direct_address(operand);
+        let low = ram[usize::from(pointer)];
+        let high = ram[usize::from(self.direct_address(operand.wrapping_add(1)))];
+        u16::from_le_bytes([low, high]).wrapping_add(u16::from(self.y))
+    }
+
     fn push(&mut self, ram: &mut [u8; 65_536], value: u8) {
         ram[0x0100 | usize::from(self.sp)] = value;
         self.sp = self.sp.wrapping_sub(1);
@@ -691,5 +753,29 @@ mod tests {
         assert_eq!(apu.spc700.y, 0xa5);
         assert_eq!(apu.spc700.sp, 0xef);
         assert_eq!(apu.spc700.psw & 0x82, 0x80);
+    }
+
+    #[test]
+    fn spc700_indirect_pointer_forms_read_and_write_through_direct_page() {
+        let mut apu = Apu::default();
+        apu.ram[0x10] = 0x00;
+        apu.ram[0x11] = 0x20;
+        apu.ram[0x2000] = 0x0f;
+        apu.ram[..8].copy_from_slice(&[
+            0xe8, 0xf0, // MOV A,#$f0
+            0x07, 0x10, // OR A,[10+X]
+            0xe7, 0x10, // MOV A,[10+X]
+            0xc7, 0x10, // MOV [10+X],A
+        ]);
+
+        apu.step_spc700();
+        assert_eq!(apu.spc700.a, 0xf0);
+        apu.step_spc700();
+        assert_eq!(apu.spc700.a, 0xff);
+        apu.step_spc700();
+        assert_eq!(apu.spc700.a, 0x0f);
+        apu.step_spc700();
+        assert_eq!(apu.spc700.a, 0x0f);
+        assert_eq!(apu.ram[0x2000], 0x0f);
     }
 }

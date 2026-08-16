@@ -1,0 +1,47 @@
+# Optional, explicit acceptance cases. This file is tracked; generated corpus
+# files and target artifacts are not. Paths are relative to corpus_root/source.
+# Set enabled = true only after the case's oracle is known to be valid for the
+# current core revision.
+format_version = 1
+corpus_root = "tests/snes-test-roms/materialized"
+artifact_root = "target/snes-acceptance"
+
+[case.peterlemon-cpuadc]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "CPUTest/CPU/ADC/CPUADC.sfc"
+rom_sha256 = "d6c4f5a284ce7842b8a3944b2bc51c8cde2f5932305f9b561334f4b7f49b5b4c"
+enabled = false
+diagnostic_only = true
+max_frames = 1
+max_master_ticks = 2000000
+deterministic_replay = true
+capture_frame = 1
+reference = "CPUTest/CPU/ADC/CPUADC.png"
+reference_sha256 = "26839bf45db3117a031d872ce37ccc254659cf9509b221a3245a55810e5cc778"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-cpuadc"
+
+[case.higan-hblank-dma]
+source = "higan-snes-test-roms"
+revision = "26e8aa91e0d3b90b901e7e693bc4a8244b391d7b"
+rom = "93143-hblank-dma-vram/hvdma.sfc"
+rom_sha256 = "8dfeece984c292682cce6a8b02e07a32d2f304737c538fe7882a87a5ac005bfc"
+enabled = false
+diagnostic_only = true
+max_frames = 1
+max_master_ticks = 2000000
+deterministic_replay = true
+capture_frame = 1
+reference = "93143-hblank-dma-vram/expected-output.jpg"
+reference_sha256 = "f418a20468110aa5db86733393e0a79e128789b36aedc32f77e8adb3548de25b"
+reference_format = "jpeg"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "higan-hblank-dma"
