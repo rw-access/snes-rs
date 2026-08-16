@@ -3,6 +3,7 @@ members = [
     "crates/snes-core",
     "crates/snes-render",
     "crates/snes-play",
+    "crates/snes-wasm",
 ]
 resolver = "2"
 

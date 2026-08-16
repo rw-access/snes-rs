@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>snes-rs — browser frontend</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="toolbar">
+        <div>
+          <h1>snes-rs</h1>
+          <p id="status" role="status" aria-live="polite">Choose an SNES ROM to begin.</p>
+        </div>
+        <label class="file-button" for="rom-input">
+          Load ROM
+          <input id="rom-input" type="file" accept=".sfc,.smc,application/octet-stream">
+        </label>
+        <button id="audio-button" type="button">Enable audio</button>
+        <button id="snapshot-button" type="button" disabled>Save state</button>
+        <button id="restore-button" type="button" disabled>Restore state</button>
+        <button id="rewind-button" type="button" disabled>Rewind</button>
+      </header>
+
+      <section class="screen-wrap" aria-label="SNES screen">
+        <canvas id="screen" width="256" height="224" aria-label="SNES video output"></canvas>
+      </section>
+
+      <section class="controls" aria-label="Touch controls">
+        <div class="dpad">
+          <button data-button="up" aria-label="Up">▲</button>
+          <button data-button="left" aria-label="Left">◀</button>
+          <button data-button="down" aria-label="Down">▼</button>
+          <button data-button="right" aria-label="Right">▶</button>
+        </div>
+        <div class="center-controls">
+          <div class="menu-buttons">
+            <button data-button="select">Select</button>
+            <button data-button="start">Start</button>
+          </div>
+          <div class="shoulder-buttons">
+            <button data-button="l" aria-label="Left shoulder">L</button>
+            <button data-button="r" aria-label="Right shoulder">R</button>
+          </div>
+        </div>
+        <div class="face-buttons">
+          <button data-button="y" aria-label="Y">Y</button>
+          <button data-button="b" aria-label="B">B</button>
+          <button data-button="a" aria-label="A">A</button>
+          <button data-button="x" aria-label="X">X</button>
+        </div>
+      </section>
+
+      <p class="hint">Keyboard: WASD or arrows, J/K or Z/X, U/I/O/P for Y/X/L/R, Shift, Enter. Hold R or Rewind to go backward. M toggles mute. Touch controls work on mobile.</p>
+    </main>
+    <script type="module" src="app.js?v=2"></script>
+  </body>
+</html>
