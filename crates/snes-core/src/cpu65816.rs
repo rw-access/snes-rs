@@ -208,6 +208,124 @@ impl Cpu65816 {
                 self.state.program_bank = bank;
                 cycles = 4;
             }
+            0x82 => {
+                let offset = self.fetch_word(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = self.state.pc.wrapping_add_signed(offset as i16);
+                cycles = 4;
+            }
+            0x6c | 0x7c | 0xdc => {
+                let pointer = self.fetch_word(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let pointer = if opcode == 0x7c {
+                    pointer.wrapping_add(self.state.x)
+                } else {
+                    pointer
+                };
+                let bank = if opcode == 0xdc {
+                    let lo = self.read(
+                        bus,
+                        Address24::new(u32::from(pointer)),
+                        BusAccessKind::DataRead,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    let hi = self.read(
+                        bus,
+                        Address24::new(u32::from(pointer.wrapping_add(1))),
+                        BusAccessKind::DataRead,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    let bank = self.read(
+                        bus,
+                        Address24::new(u32::from(pointer.wrapping_add(2))),
+                        BusAccessKind::DataRead,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.state.pc = u16::from_le_bytes([lo, hi]);
+                    bank
+                } else {
+                    let lo = self.read(
+                        bus,
+                        Address24::new(u32::from(pointer)),
+                        BusAccessKind::DataRead,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    let hi = self.read(
+                        bus,
+                        Address24::new(u32::from(pointer.wrapping_add(1))),
+                        BusAccessKind::DataRead,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.state.pc = u16::from_le_bytes([lo, hi]);
+                    self.state.program_bank
+                };
+                if opcode == 0xdc {
+                    self.state.program_bank = bank;
+                }
+                cycles = if opcode == 0xdc { 6 } else { 5 };
+            }
+            0xfc => {
+                let pointer = self.fetch_word(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let pointer = pointer.wrapping_add(self.state.x);
+                let lo = self.read(
+                    bus,
+                    Address24::new(u32::from(pointer)),
+                    BusAccessKind::DataRead,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let hi = self.read(
+                    bus,
+                    Address24::new(u32::from(pointer.wrapping_add(1))),
+                    BusAccessKind::DataRead,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.push_word(
+                    bus,
+                    self.state.pc.wrapping_sub(1),
+                    &mut trace,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                self.state.pc = u16::from_le_bytes([lo, hi]);
+                cycles = 8;
+            }
             0x20 => {
                 let target = self.fetch_word(
                     bus,
@@ -1181,6 +1299,92 @@ impl Cpu65816 {
                     ),
                 }
                 cycles = 3;
+            }
+            0x0b | 0x2b | 0x4b | 0x8b | 0xab | 0xd4 | 0xf4 | 0x62 => {
+                match opcode {
+                    0x0b => self.push_word(
+                        bus,
+                        self.state.direct_page,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x2b => {
+                        let low = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                        let high = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                        self.state.direct_page = u16::from_le_bytes([low, high]);
+                        self.set_zero_negative(self.state.direct_page, false);
+                    }
+                    0x4b => self.push_byte(
+                        bus,
+                        self.state.program_bank,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x8b => self.push_byte(
+                        bus,
+                        self.state.data_bank,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0xab => {
+                        self.state.data_bank = self.pop_byte(
+                            bus,
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.set_zero_negative(u16::from(self.state.data_bank), true);
+                    }
+                    0xd4 => {
+                        let address = self.direct_address(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        let value = self.read_value(
+                            bus,
+                            address,
+                            false,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.push_word(bus, value, &mut trace, &mut master_ticks, &mut access_count);
+                    }
+                    0xf4 => {
+                        let value = self.fetch_word(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.push_word(bus, value, &mut trace, &mut master_ticks, &mut access_count);
+                    }
+                    _ => {
+                        let offset = self.fetch_word(
+                            bus,
+                            &mut trace,
+                            &mut cycles,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                        self.push_word(
+                            bus,
+                            self.state.pc.wrapping_add_signed(offset as i16),
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                    }
+                }
+                cycles = 5;
             }
             0x28 | 0x68 | 0x7a | 0xfa => {
                 match opcode {
@@ -2367,5 +2571,23 @@ mod tests {
         cpu.step_with_bus(&mut bus, None);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().a & 0xff, 0x5a);
+    }
+
+    #[test]
+    fn indirect_jumps_and_stack_address_operands_follow_control_flow() {
+        let mut bus = FlatBus::new();
+        bus.memory[..3].copy_from_slice(&[0x6c, 0x00, 0x20]);
+        bus.memory[0x2000] = 0x00;
+        bus.memory[0x2001] = 0x30;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().pc, 0x3000);
+
+        let mut bus = FlatBus::new();
+        bus.memory[..4].copy_from_slice(&[0xf4, 0x34, 0x12, 0x68]);
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x34);
     }
 }
