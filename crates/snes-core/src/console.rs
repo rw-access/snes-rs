@@ -4,7 +4,7 @@ use crate::{
     bus::{Address24, TraceSink},
     cartridge::{CartridgeDevice, LoadError, RomImage, RomOnlyCartridge},
     controller::ControllerState,
-    cpu65816::{Cpu65816, CpuState, CpuStep},
+    cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep},
     dma::Dma,
     ppu::Ppu,
     video::FrameOutput,
@@ -46,15 +46,32 @@ impl Console {
     /// Resets the machine state.
     pub fn reset(&mut self) {
         self.cpu.reset();
+        let mut bus = ConsoleBus {
+            wram: &mut self.wram,
+            cartridge: &mut *self.cartridge,
+        };
+        self.cpu.reset_with_bus(&mut bus);
     }
 
     /// Advances one instruction according to the future CPU execution plan.
     pub fn step_instruction(&mut self) -> CpuStep {
-        self.cpu.step_instruction(None)
+        let mut bus = ConsoleBus {
+            wram: &mut self.wram,
+            cartridge: &mut *self.cartridge,
+        };
+        let step = self.cpu.step_with_bus(&mut bus, None);
+        self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
+        step
     }
 
     pub fn step_instruction_traced(&mut self, trace: &mut dyn TraceSink) -> CpuStep {
-        self.cpu.step_instruction(Some(trace))
+        let mut bus = ConsoleBus {
+            wram: &mut self.wram,
+            cartridge: &mut *self.cartridge,
+        };
+        let step = self.cpu.step_with_bus(&mut bus, Some(trace));
+        self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
+        step
     }
 
     /// Advances the machine by a number of master-clock ticks.
@@ -107,6 +124,31 @@ impl Console {
         self.controller = state.controller;
         self.timing = state.timing;
         Ok(())
+    }
+}
+
+struct ConsoleBus<'a> {
+    wram: &'a mut [u8],
+    cartridge: &'a mut dyn CartridgeDevice,
+}
+
+impl CpuBus for ConsoleBus<'_> {
+    fn read(&mut self, address: Address24) -> u8 {
+        let raw = address.get();
+        if (0x7e_0000..=0x7f_ffff).contains(&raw) {
+            return self.wram[(raw as usize - 0x7e_0000) % self.wram.len()];
+        }
+        self.cartridge.read(address)
+    }
+
+    fn write(&mut self, address: Address24, value: u8) {
+        let raw = address.get();
+        if (0x7e_0000..=0x7f_ffff).contains(&raw) {
+            let index = (raw as usize - 0x7e_0000) % self.wram.len();
+            self.wram[index] = value;
+        } else {
+            self.cartridge.write(address, value);
+        }
     }
 }
 
@@ -163,5 +205,23 @@ mod tests {
         let traced_step = traced.step_instruction_traced(&mut trace);
         assert_eq!(plain_step, traced_step);
         assert_eq!(trace.as_slice().len(), 1);
+    }
+
+    #[test]
+    fn console_executes_a_rom_through_the_machine_bus() {
+        let mut rom = vec![0xea; 0x8000];
+        rom[0] = 0xa9;
+        rom[1] = 0x5a;
+        rom[2] = 0x8f;
+        rom[3] = 0x00;
+        rom[4] = 0x00;
+        rom[5] = 0x7e;
+        rom[0x7ffc] = 0x00;
+        rom[0x7ffd] = 0x80;
+        let mut console = Console::new(RomImage::new(rom)).unwrap();
+        console.reset();
+        console.step_instruction();
+        console.step_instruction();
+        assert_eq!(console.read_memory(Address24::new(0x7e0000)), 0x5a);
     }
 }

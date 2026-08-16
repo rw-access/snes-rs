@@ -104,13 +104,6 @@ impl Cpu65816 {
         self.state.pc = u16::from_le_bytes([lo, hi]);
     }
 
-    /// Executes an instruction against an empty bus. This keeps the public
-    /// scaffold API useful while the complete console bus is assembled.
-    pub(crate) fn step_instruction(&mut self, trace: Option<&mut dyn TraceSink>) -> CpuStep {
-        let mut bus = EmptyBus;
-        self.step_with_bus(&mut bus, trace)
-    }
-
     /// Executes one instruction using the same path used by traced execution.
     pub fn step_with_bus(
         &mut self,
@@ -587,15 +580,6 @@ impl Cpu65816 {
             }
         }
     }
-}
-
-struct EmptyBus;
-
-impl CpuBus for EmptyBus {
-    fn read(&mut self, _address: Address24) -> u8 {
-        0
-    }
-    fn write(&mut self, _address: Address24, _value: u8) {}
 }
 
 #[cfg(test)]
