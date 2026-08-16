@@ -455,6 +455,75 @@ impl Cpu65816 {
                 }
                 cycles = if long { 5 } else if addressing == 0x0d { 4 } else { 3 };
             }
+            0x01 | 0x07 | 0x11 | 0x12 | 0x17 | 0x21 | 0x27 | 0x31 | 0x32 | 0x37 | 0x41
+            | 0x47 | 0x51 | 0x52 | 0x57 | 0x61 | 0x67 | 0x71 | 0x72 | 0x77 | 0xc1 | 0xc7
+            | 0xd1 | 0xd2 | 0xd7 | 0xe1 | 0xe7 | 0xf1 | 0xf2 | 0xf7 => {
+                let mode = opcode & 0x1f;
+                let address = match mode {
+                    0x01 => self.fetch_direct_indexed_indirect_address(
+                        bus,
+                        self.state.x,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x11 => self.fetch_direct_indirect_address(
+                        bus,
+                        self.state.y,
+                        false,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x12 => self.fetch_direct_indirect_address(
+                        bus,
+                        0,
+                        false,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x07 => self.fetch_direct_indirect_address(
+                        bus,
+                        0,
+                        true,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    _ => self.fetch_direct_indirect_address(
+                        bus,
+                        self.state.y,
+                        true,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                match opcode & 0xe0 {
+                    0x00 => self.logic_acc(value, |lhs, rhs| lhs | rhs),
+                    0x20 => self.logic_acc(value, |lhs, rhs| lhs & rhs),
+                    0x40 => self.logic_acc(value, |lhs, rhs| lhs ^ rhs),
+                    0x60 => self.adc(value),
+                    0xc0 => self.compare(self.state.a, value, self.accumulator_is_8_bit()),
+                    _ => self.sbc(value),
+                }
+                cycles = 6;
+            }
             0x15 | 0x35 | 0x55 | 0x75 | 0xd5 | 0xf5 | 0x1d | 0x3d | 0x5d | 0x7d | 0xdd
             | 0xfd | 0x19 | 0x39 | 0x59 | 0x79 | 0xd9 | 0xf9 | 0x1f | 0x3f | 0x5f | 0x7f
             | 0xdf | 0xff => {
@@ -808,11 +877,11 @@ impl Cpu65816 {
                 self.set_zero_negative(value, self.index_is_8_bit());
                 cycles = 3;
             }
-            0xa1 | 0xb1 | 0xb5 | 0xb9 | 0xbd | 0xbf | 0x81 | 0x91 | 0x95 | 0x99 | 0x9d
-            | 0x9f => {
-                let is_load = opcode & 0x80 == 0x80 && opcode & 0x20 != 0;
+            0xa1 | 0xa7 | 0xb1 | 0xb2 | 0xb5 | 0xb7 | 0xb9 | 0xbd | 0xbf | 0x81 | 0x87
+            | 0x91 | 0x92 | 0x95 | 0x97 | 0x99 | 0x9d | 0x9f => {
+                let is_load = opcode >= 0xa0;
                 let address = match opcode & 0x1f {
-                    0x01 => self.direct_indexed_address(
+                    0x01 => self.fetch_direct_indexed_indirect_address(
                         bus,
                         self.state.x,
                         &mut trace,
@@ -820,9 +889,37 @@ impl Cpu65816 {
                         &mut master_ticks,
                         &mut access_count,
                     ),
-                    0x11 => self.absolute_indexed_address(
+                    0x11 => self.fetch_direct_indirect_address(
                         bus,
                         self.state.y,
+                        false,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x12 => self.fetch_direct_indirect_address(
+                        bus,
+                        0,
+                        false,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x07 => self.fetch_direct_indirect_address(
+                        bus,
+                        0,
+                        true,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    ),
+                    0x17 => self.fetch_direct_indirect_address(
+                        bus,
+                        self.state.y,
+                        true,
                         &mut trace,
                         &mut cycles,
                         &mut master_ticks,
@@ -1670,6 +1767,106 @@ impl Cpu65816 {
         Address24::new(address.get().wrapping_add(u32::from(index)))
     }
 
+    fn direct_indirect_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        offset: u8,
+        index: u16,
+        long: bool,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let pointer = self.state.direct_page.wrapping_add(u16::from(offset));
+        let low = self.read(
+            bus,
+            Address24::new(u32::from(pointer)),
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        let high = self.read(
+            bus,
+            Address24::new(u32::from(pointer.wrapping_add(1))),
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        let base = u16::from_le_bytes([low, high]);
+        let bank = if long {
+            self.read(
+                bus,
+                Address24::new(u32::from(pointer.wrapping_add(2))),
+                BusAccessKind::DataRead,
+                trace,
+                cycles,
+                ticks,
+                count,
+            )
+        } else {
+            self.state.data_bank
+        };
+        Address24::new((u32::from(bank) << 16) | u32::from(base.wrapping_add(index)))
+    }
+
+    fn fetch_direct_indirect_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        index: u16,
+        long: bool,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        self.direct_indirect_address(bus, offset, index, long, trace, cycles, ticks, count)
+    }
+
+    fn fetch_direct_indexed_indirect_address(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        index: u16,
+        trace: &mut Option<&mut dyn TraceSink>,
+        cycles: &mut u32,
+        ticks: &mut u64,
+        count: &mut u32,
+    ) -> Address24 {
+        let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
+        let pointer = self
+            .state
+            .direct_page
+            .wrapping_add(u16::from(offset))
+            .wrapping_add(index);
+        let low = self.read(
+            bus,
+            Address24::new(u32::from(pointer)),
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        let high = self.read(
+            bus,
+            Address24::new(u32::from(pointer.wrapping_add(1))),
+            BusAccessKind::DataRead,
+            trace,
+            cycles,
+            ticks,
+            count,
+        );
+        Address24::new(
+            (u32::from(self.state.data_bank) << 16)
+                | u32::from(u16::from_le_bytes([low, high])),
+        )
+    }
+
     fn long_address(
         &mut self,
         bus: &mut dyn CpuBus,
@@ -2157,5 +2354,18 @@ mod tests {
         assert_eq!(cpu.state().a, 0xffff);
         assert_eq!(cpu.state().x, 0x0102);
         assert_eq!(cpu.state().data_bank, 2);
+    }
+
+    #[test]
+    fn direct_indirect_addressing_reads_pointer_from_bank_zero() {
+        let mut bus = FlatBus::new();
+        bus.memory[..4].copy_from_slice(&[0xa2, 0x01, 0xa1, 0x0f]);
+        bus.memory[0x10] = 0x00;
+        bus.memory[0x11] = 0x20;
+        bus.memory[0x2000] = 0x5a;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x5a);
     }
 }
