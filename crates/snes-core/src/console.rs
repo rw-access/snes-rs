@@ -4,7 +4,7 @@ use crate::{
     apu::Apu,
     bus::{Address24, TraceSink},
     cartridge::{CartridgeDevice, LoadError, RomImage, RomOnlyCartridge},
-    controller::ControllerState,
+    controller::{ControllerPort, ControllerPorts},
     cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep, InterruptKind},
     dma::Dma,
     ppu::{Ppu, SCREEN_HEIGHT, SCREEN_WIDTH},
@@ -15,6 +15,8 @@ use crate::{
 /// bounded headless runner. The renderer remains deterministic even before
 /// scanline-level timing is introduced.
 pub const MASTER_TICKS_PER_FRAME: u64 = 357_366;
+pub const MASTER_TICKS_PER_SCANLINE: u64 = 1_364;
+const NTSC_SCANLINES: u16 = 262;
 
 /// The complete SNES machine state owned by the core.
 pub struct Console {
@@ -25,7 +27,7 @@ pub struct Console {
     wram: Vec<u8>,
     ppu: Ppu,
     dma: Dma,
-    controller: ControllerState,
+    controller: ControllerPorts,
     timing: TimingState,
     framebuffer: Vec<u32>,
     apu: Apu,
@@ -46,7 +48,7 @@ impl Console {
             wram: vec![0; 128 * 1024],
             ppu: Ppu::default(),
             dma: Dma::default(),
-            controller: ControllerState::default(),
+            controller: ControllerPorts::default(),
             timing: TimingState::default(),
             framebuffer: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT],
             apu: Apu::default(),
@@ -58,7 +60,7 @@ impl Console {
         self.cpu.reset();
         self.ppu = Ppu::default();
         self.dma = Dma::default();
-        self.controller = ControllerState::default();
+        self.controller = ControllerPorts::default();
         self.timing = TimingState::default();
         self.framebuffer.fill(0);
         self.apu = Apu::default();
@@ -84,11 +86,8 @@ impl Console {
             apu: &mut self.apu,
         };
         let step = self.cpu.step_with_bus(&mut bus, None);
-        self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         drop(bus);
-        self.apu.step_spc700();
-        self.run_pending_dma();
-        step
+        self.finish_cpu_step(step)
     }
 
     pub fn step_instruction_traced(&mut self, trace: &mut dyn TraceSink) -> CpuStep {
@@ -101,11 +100,8 @@ impl Console {
             apu: &mut self.apu,
         };
         let step = self.cpu.step_with_bus(&mut bus, Some(trace));
-        self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         drop(bus);
-        self.apu.step_spc700();
-        self.run_pending_dma();
-        step
+        self.finish_cpu_step(step)
     }
 
     pub fn request_interrupt(&mut self, kind: InterruptKind) -> CpuStep {
@@ -118,7 +114,15 @@ impl Console {
             apu: &mut self.apu,
         };
         let step = self.cpu.service_interrupt(&mut bus, kind, None);
+        drop(bus);
+        self.finish_cpu_step(step)
+    }
+
+    fn finish_cpu_step(&mut self, step: CpuStep) -> CpuStep {
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
+        self.apu.step_spc700();
+        self.run_pending_dma();
+        self.run_hdma_boundaries();
         step
     }
 
@@ -144,6 +148,42 @@ impl Console {
             .timing
             .master_ticks
             .saturating_add(u64::from(transfers) * 6);
+    }
+
+    fn run_hdma_boundaries(&mut self) {
+        while self.timing.master_ticks >= self.timing.next_hdma_tick {
+            // A malformed or saturated snapshot must not turn the bounded
+            // scheduler into an infinite loop once the absolute tick domain
+            // can no longer represent another scanline boundary.
+            if self.timing.next_hdma_tick == u64::MAX {
+                break;
+            }
+            if self.timing.scanline == 0 {
+                self.dma.begin_hdma_frame();
+            }
+            let mut dma = self.dma;
+            let mut bus = ConsoleBus {
+                wram: &mut self.wram,
+                cartridge: &mut *self.cartridge,
+                ppu: &mut self.ppu,
+                controller: &mut self.controller,
+                dma: None,
+                apu: &mut self.apu,
+            };
+            let transfers = dma.run_hdma_scanline(&mut bus);
+            drop(bus);
+            self.dma = dma;
+            self.timing.master_ticks = self
+                .timing
+                .master_ticks
+                .saturating_add(u64::from(transfers) * 6);
+            self.timing.scanline = (self.timing.scanline + 1) % NTSC_SCANLINES;
+            self.timing.next_hdma_tick = self
+                .timing
+                .next_hdma_tick
+                .checked_add(MASTER_TICKS_PER_SCANLINE)
+                .unwrap_or(u64::MAX);
+        }
     }
 
     /// Advances the machine by a number of master-clock ticks.
@@ -236,7 +276,7 @@ struct ConsoleBus<'a> {
     wram: &'a mut [u8],
     cartridge: &'a mut dyn CartridgeDevice,
     ppu: &'a mut Ppu,
-    controller: &'a mut ControllerState,
+    controller: &'a mut ControllerPorts,
     dma: Option<&'a mut Dma>,
     apu: &'a mut Apu,
 }
@@ -250,11 +290,17 @@ impl CpuBus for ConsoleBus<'_> {
         if let Some(register) = ppu_register(raw) {
             return self.ppu.read_register(register);
         }
-        if raw & 0xffff == 0x4016 {
-            return self.controller.read_serial();
+        if let Some(port) = controller_port(raw) {
+            return self.controller.read_port(port, 0);
         }
         if let Some(port) = apu_port(raw) {
             return self.apu.read_cpu_port(port);
+        }
+        if let Some(register) = dma_register(raw) {
+            return self
+                .dma
+                .as_deref_mut()
+                .map_or(0, |dma| dma.read_register(register));
         }
         self.cartridge.read(address)
     }
@@ -265,15 +311,15 @@ impl CpuBus for ConsoleBus<'_> {
             self.wram[index] = value;
         } else if let Some(register) = ppu_register(raw) {
             self.ppu.write_register(register, value);
-        } else if raw & 0xffff == 0x4016 {
-            self.controller.write_strobe(value);
+        } else if let Some(port) = controller_port(raw) {
+            if port == ControllerPort::Port1 {
+                self.controller.write_strobe(value);
+            }
         } else if let Some(port) = apu_port(raw) {
             self.apu.write_cpu_port(port, value);
-        } else if let Some(dma) = self.dma.as_deref_mut() {
-            if (0x4200..=0x437f).contains(&(raw as u16)) {
-                dma.write_register(raw as u16, value);
-            } else {
-                self.cartridge.write(address, value);
+        } else if let Some(register) = dma_register(raw) {
+            if let Some(dma) = self.dma.as_deref_mut() {
+                dma.write_register(register, value);
             }
         } else {
             self.cartridge.write(address, value);
@@ -281,20 +327,39 @@ impl CpuBus for ConsoleBus<'_> {
     }
 }
 
-fn apu_port(address: u32) -> Option<usize> {
+fn is_system_bank(address: u32) -> bool {
     let bank = address >> 16;
+    bank <= 0x3f || (0x80..=0xbf).contains(&bank)
+}
+
+fn controller_port(address: u32) -> Option<ControllerPort> {
+    if !is_system_bank(address) {
+        return None;
+    }
+    match address & 0xffff {
+        0x4016 => Some(ControllerPort::Port1),
+        0x4017 => Some(ControllerPort::Port2),
+        _ => None,
+    }
+}
+
+fn dma_register(address: u32) -> Option<u16> {
     let offset = address & 0xffff;
-    ((bank <= 0x3f || (0x80..=0xbf).contains(&bank))
-        && (0x2140..=0x2143).contains(&offset))
-        .then_some((offset - 0x2140) as usize)
+    (is_system_bank(address) && (0x4200..=0x437f).contains(&offset)).then_some(offset as u16)
+}
+
+fn apu_port(address: u32) -> Option<usize> {
+    let offset = address & 0xffff;
+    if is_system_bank(address) && (0x2140..=0x2143).contains(&offset) {
+        Some((offset - 0x2140) as usize)
+    } else {
+        None
+    }
 }
 
 fn ppu_register(address: u32) -> Option<u16> {
-    let bank = address >> 16;
     let offset = address & 0xffff;
-    ((bank <= 0x3f || (0x80..=0xbf).contains(&bank))
-        && (0x2100..=0x213f).contains(&offset))
-        .then_some(offset as u16)
+    (is_system_bank(address) && (0x2100..=0x213f).contains(&offset)).then_some(offset as u16)
 }
 
 fn wram_index(address: u32, wram_len: usize) -> Option<usize> {
@@ -303,7 +368,7 @@ fn wram_index(address: u32, wram_len: usize) -> Option<usize> {
     if (0x7e..=0x7f).contains(&bank) {
         return Some(((address - 0x7e_0000) as usize) % wram_len);
     }
-    if (bank <= 0x3f || (0x80..=0xbf).contains(&bank)) && offset < 0x2000 {
+    if is_system_bank(address) && offset < 0x2000 {
         return Some((offset as usize) % wram_len);
     }
     None
@@ -322,13 +387,25 @@ pub struct ConsoleState {
     pub apu: Apu,
     pub ppu: Ppu,
     pub dma: Dma,
-    pub controller: ControllerState,
+    pub controller: ControllerPorts,
     pub timing: TimingState,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimingState {
     pub master_ticks: u64,
+    pub scanline: u16,
+    pub next_hdma_tick: u64,
+}
+
+impl Default for TimingState {
+    fn default() -> Self {
+        Self {
+            master_ticks: 0,
+            scanline: 0,
+            next_hdma_tick: MASTER_TICKS_PER_SCANLINE,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,7 +419,138 @@ pub enum RestoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bus::VecTrace, cartridge::RomImage};
+    use crate::{
+        bus::{AccessSpeed, VecTrace},
+        cartridge::{CartridgeDevice, RomImage},
+    };
+
+    struct ProbeCartridge {
+        read_value: u8,
+        writes: Vec<(u32, u8)>,
+    }
+
+    impl CartridgeDevice for ProbeCartridge {
+        fn read(&mut self, _address: Address24) -> u8 {
+            self.read_value
+        }
+
+        fn write(&mut self, address: Address24, value: u8) {
+            self.writes.push((address.get(), value));
+        }
+
+        fn access_speed(&self, _address: Address24) -> AccessSpeed {
+            AccessSpeed::Fast
+        }
+    }
+
+    #[test]
+    fn unmapped_low_bus_addresses_do_not_underflow_apu_port_decode() {
+        assert_eq!(apu_port(0x000000), None);
+        assert_eq!(apu_port(0x002140), Some(0));
+    }
+
+    #[test]
+    fn system_devices_only_decode_in_system_banks_and_keep_priority() {
+        let mut wram = vec![0; 128 * 1024];
+        let mut ppu = Ppu::default();
+        let mut controller = ControllerPorts::default();
+        controller.port1.set_buttons(1);
+        controller.port2.set_buttons(1 << 1);
+        controller.write_strobe(1);
+        let mut dma = Dma::default();
+        let mut apu = Apu::default();
+        let mut cartridge = ProbeCartridge {
+            read_value: 0xee,
+            writes: Vec::new(),
+        };
+        let mut bus = ConsoleBus {
+            wram: &mut wram,
+            cartridge: &mut cartridge,
+            ppu: &mut ppu,
+            controller: &mut controller,
+            dma: Some(&mut dma),
+            apu: &mut apu,
+        };
+
+        // WRAM, PPU, APU, controller, and DMA all win in the system banks.
+        bus.write(Address24::new(0x000123), 0xa5);
+        assert_eq!(bus.read(Address24::new(0x800123)), 0xa5);
+        bus.write(Address24::new(0x002100), 0x12);
+        assert_eq!(bus.read(Address24::new(0x802100)), 0x12);
+        bus.write(Address24::new(0x002140), 0x34);
+        assert_eq!(bus.read(Address24::new(0x802140)), 0x34);
+        assert_eq!(bus.read(Address24::new(0x004016)), 1);
+        assert_eq!(bus.read(Address24::new(0x004017)), 0x1c);
+        bus.write(Address24::new(0x004017), 0);
+        bus.write(Address24::new(0x804016), 0);
+        assert_eq!(bus.read(Address24::new(0x804016)), 1);
+        assert_eq!(bus.read(Address24::new(0x804017)), 0x1c);
+        bus.write(Address24::new(0x00430b), 0x01);
+        assert_eq!(bus.read(Address24::new(0x80430b)), 0);
+        bus.write(Address24::new(0x004302), 0x78);
+        assert_eq!(bus.read(Address24::new(0x804302)), 0x78);
+
+        // The same offsets in a cartridge bank must reach the cartridge and
+        // must not mutate any of the system-device state above.
+        assert_eq!(bus.read(Address24::new(0x400123)), 0xee);
+        assert_eq!(bus.read(Address24::new(0x402100)), 0xee);
+        assert_eq!(bus.read(Address24::new(0x402140)), 0xee);
+        assert_eq!(bus.read(Address24::new(0x404016)), 0xee);
+        assert_eq!(bus.read(Address24::new(0x404017)), 0xee);
+        assert_eq!(bus.read(Address24::new(0x404302)), 0xee);
+        bus.write(Address24::new(0x40430b), 0x02);
+        bus.write(Address24::new(0x404302), 0x99);
+        assert_eq!(bus.read(Address24::new(0x004302)), 0x78);
+        drop(bus);
+        assert_eq!(cartridge.writes, vec![(0x40430b, 0x02), (0x404302, 0x99)]);
+    }
+
+    #[test]
+    fn dma_register_accesses_do_not_fall_through_during_dma_bus_use() {
+        let mut wram = vec![0; 128 * 1024];
+        let mut ppu = Ppu::default();
+        let mut controller = ControllerPorts::default();
+        let mut apu = Apu::default();
+        let mut cartridge = ProbeCartridge {
+            read_value: 0xee,
+            writes: Vec::new(),
+        };
+        let mut bus = ConsoleBus {
+            wram: &mut wram,
+            cartridge: &mut cartridge,
+            ppu: &mut ppu,
+            controller: &mut controller,
+            dma: None,
+            apu: &mut apu,
+        };
+
+        assert_eq!(bus.read(Address24::new(0x00420c)), 0);
+        bus.write(Address24::new(0x00420b), 1);
+        drop(bus);
+        assert!(cartridge.writes.is_empty());
+    }
+
+    #[test]
+    fn hdma_runs_at_console_scanline_boundaries() {
+        let mut rom = vec![0xea; 0x8000];
+        rom[0x7ffc] = 0x00;
+        rom[0x7ffd] = 0x80;
+        let mut console = Console::new(RomImage::new(rom)).unwrap();
+        console.reset();
+        console.dma.channels[0] = crate::dma::DmaChannel {
+            destination: 0x18,
+            source_address: 0x1000,
+            ..crate::dma::DmaChannel::default()
+        };
+        console.dma.hdma_enable = 1;
+        console.wram[0x1000..0x1003].copy_from_slice(&[1, 0xaa, 0]);
+        console.timing.next_hdma_tick = 1;
+
+        console.step_instruction();
+
+        assert_eq!(console.ppu.vram[0] as u8, 0xaa);
+        assert_eq!(console.timing.scanline, 1);
+    }
 
     #[test]
     fn snapshot_restores_memory_and_timing() {
@@ -357,6 +565,31 @@ mod tests {
         assert_ne!(console.snapshot(), snapshot);
         console.restore(&snapshot).unwrap();
         assert_eq!(console.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn snapshot_restores_scanline_scheduler_state() {
+        let mut console = Console::new(RomImage::new(vec![0xea; 8])).unwrap();
+        console.timing = TimingState {
+            master_ticks: MASTER_TICKS_PER_SCANLINE * 17 + 9,
+            scanline: 17,
+            next_hdma_tick: MASTER_TICKS_PER_SCANLINE * 18,
+        };
+        console.dma.hdma_channels[2] = crate::dma::HdmaChannelState {
+            table_address: 0x3456,
+            line_counter: 3,
+            initialized: true,
+            transfer_pending: true,
+            ..crate::dma::HdmaChannelState::default()
+        };
+        let snapshot = console.snapshot();
+
+        console.timing = TimingState::default();
+        console.dma.hdma_channels[2] = crate::dma::HdmaChannelState::default();
+        console.restore(&snapshot).unwrap();
+
+        assert_eq!(console.timing, snapshot.timing);
+        assert_eq!(console.dma.hdma_channels[2], snapshot.dma.hdma_channels[2]);
     }
 
     #[test]

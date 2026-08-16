@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 snes-core = { path = "../snes-core" }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+png = { version = "0.17.16", default-features = false }
 
 [[bin]]
 name = "snes-test"

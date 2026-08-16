@@ -176,8 +176,12 @@ impl Cpu65816 {
             cycles: if self.state.emulation_mode { 7 } else { 8 },
             master_ticks: master_ticks
                 + u64::from(
-                    (if self.state.emulation_mode { 7u32 } else { 8u32 })
-                        .saturating_sub(access_count),
+                    (if self.state.emulation_mode {
+                        7u32
+                    } else {
+                        8u32
+                    })
+                    .saturating_sub(access_count),
                 ) * 6,
             access_count,
         }
@@ -480,9 +484,8 @@ impl Cpu65816 {
                 );
                 let count = u32::from(self.state.a).wrapping_add(1);
                 for _ in 0..count {
-                    let source = Address24::new(
-                        (u32::from(source_bank) << 16) | u32::from(self.state.x),
-                    );
+                    let source =
+                        Address24::new((u32::from(source_bank) << 16) | u32::from(self.state.x));
                     let destination = Address24::new(
                         (u32::from(destination_bank) << 16) | u32::from(self.state.y),
                     );
@@ -517,71 +520,28 @@ impl Cpu65816 {
                 cycles = 7;
             }
             0x40 => {
-                self.state.status = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
-                let lo = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
-                let hi = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
+                self.state.status =
+                    self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                let lo = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                let hi = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                 self.state.pc = u16::from_le_bytes([lo, hi]);
                 if !self.state.emulation_mode {
-                    self.state.program_bank = self.pop_byte(
-                        bus,
-                        &mut trace,
-                        &mut master_ticks,
-                        &mut access_count,
-                    );
+                    self.state.program_bank =
+                        self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                 }
                 self.normalize_widths();
                 cycles = 6;
             }
             0x60 => {
-                let lo = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
-                let hi = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
+                let lo = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                let hi = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                 self.state.pc = u16::from_le_bytes([lo, hi]).wrapping_add(1);
                 cycles = 6;
             }
             0x6b => {
-                let lo = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
-                let hi = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
-                let bank = self.pop_byte(
-                    bus,
-                    &mut trace,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
+                let lo = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                let hi = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                let bank = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                 self.state.pc = u16::from_le_bytes([lo, hi]).wrapping_add(1);
                 self.state.program_bank = bank;
                 cycles = 6;
@@ -604,8 +564,8 @@ impl Cpu65816 {
                 }
                 cycles = 2 + u32::from(!self.accumulator_is_8_bit());
             }
-            0x05 | 0x25 | 0x45 | 0x65 | 0xc5 | 0xe5 | 0x0d | 0x2d | 0x4d | 0x6d | 0xcd
-            | 0xed | 0x0f | 0x2f | 0x4f | 0x6f | 0xcf | 0xef => {
+            0x05 | 0x25 | 0x45 | 0x65 | 0xc5 | 0xe5 | 0x0d | 0x2d | 0x4d | 0x6d | 0xcd | 0xed
+            | 0x0f | 0x2f | 0x4f | 0x6f | 0xcf | 0xef => {
                 let addressing = opcode & 0x0f;
                 let long = addressing == 0x0f;
                 let address = if long {
@@ -650,11 +610,17 @@ impl Cpu65816 {
                     0xc0 => self.compare(self.state.a, value, self.accumulator_is_8_bit()),
                     _ => self.sbc(value),
                 }
-                cycles = if long { 5 } else if addressing == 0x0d { 4 } else { 3 };
+                cycles = if long {
+                    5
+                } else if addressing == 0x0d {
+                    4
+                } else {
+                    3
+                };
             }
-            0x01 | 0x07 | 0x11 | 0x12 | 0x17 | 0x21 | 0x27 | 0x31 | 0x32 | 0x37 | 0x41
-            | 0x47 | 0x51 | 0x52 | 0x57 | 0x61 | 0x67 | 0x71 | 0x72 | 0x77 | 0xc1 | 0xc7
-            | 0xd1 | 0xd2 | 0xd7 | 0xe1 | 0xe7 | 0xf1 | 0xf2 | 0xf7 => {
+            0x01 | 0x07 | 0x11 | 0x12 | 0x17 | 0x21 | 0x27 | 0x31 | 0x32 | 0x37 | 0x41 | 0x47
+            | 0x51 | 0x52 | 0x57 | 0x61 | 0x67 | 0x71 | 0x72 | 0x77 | 0xc1 | 0xc7 | 0xd1 | 0xd2
+            | 0xd7 | 0xe1 | 0xe7 | 0xf1 | 0xf2 | 0xf7 => {
                 let mode = opcode & 0x1f;
                 let address = match mode {
                     0x01 => self.fetch_direct_indexed_indirect_address(
@@ -779,9 +745,8 @@ impl Cpu65816 {
                 }
                 cycles = 7;
             }
-            0x15 | 0x35 | 0x55 | 0x75 | 0xd5 | 0xf5 | 0x1d | 0x3d | 0x5d | 0x7d | 0xdd
-            | 0xfd | 0x19 | 0x39 | 0x59 | 0x79 | 0xd9 | 0xf9 | 0x1f | 0x3f | 0x5f | 0x7f
-            | 0xdf | 0xff => {
+            0x15 | 0x35 | 0x55 | 0x75 | 0xd5 | 0xf5 | 0x1d | 0x3d | 0x5d | 0x7d | 0xdd | 0xfd
+            | 0x19 | 0x39 | 0x59 | 0x79 | 0xd9 | 0xf9 | 0x1f | 0x3f | 0x5f | 0x7f | 0xdf | 0xff => {
                 let address = match opcode & 0x1f {
                     0x15 => self.direct_indexed_address(
                         bus,
@@ -893,7 +858,11 @@ impl Cpu65816 {
                     self.state.x
                 };
                 self.compare(register, value, width);
-                cycles = if opcode == 0xc4 || opcode == 0xe4 { 3 } else { 4 };
+                cycles = if opcode == 0xc4 || opcode == 0xe4 {
+                    3
+                } else {
+                    4
+                };
             }
             0x02 | 0x42 => {
                 self.fetch_byte(
@@ -962,7 +931,11 @@ impl Cpu65816 {
                     &mut access_count,
                 );
                 self.state.status = (self.state.status & !FLAG_ZERO)
-                    | if self.state.a & value == 0 { FLAG_ZERO } else { 0 };
+                    | if self.state.a & value == 0 {
+                        FLAG_ZERO
+                    } else {
+                        0
+                    };
                 cycles = 2;
             }
             0x24 | 0x2c | 0x34 | 0x3c => {
@@ -1012,14 +985,33 @@ impl Cpu65816 {
                     &mut master_ticks,
                     &mut access_count,
                 );
-                self.state.status = (self.state.status & !(FLAG_ZERO | FLAG_OVERFLOW | FLAG_NEGATIVE))
-                    | if self.state.a & value == 0 { FLAG_ZERO } else { 0 }
-                    | if value & if self.accumulator_is_8_bit() { 0x40 } else { 0x4000 } != 0 {
+                self.state.status = (self.state.status
+                    & !(FLAG_ZERO | FLAG_OVERFLOW | FLAG_NEGATIVE))
+                    | if self.state.a & value == 0 {
+                        FLAG_ZERO
+                    } else {
+                        0
+                    }
+                    | if value
+                        & if self.accumulator_is_8_bit() {
+                            0x40
+                        } else {
+                            0x4000
+                        }
+                        != 0
+                    {
                         FLAG_OVERFLOW
                     } else {
                         0
                     }
-                    | if value & if self.accumulator_is_8_bit() { 0x80 } else { 0x8000 } != 0 {
+                    | if value
+                        & if self.accumulator_is_8_bit() {
+                            0x80
+                        } else {
+                            0x8000
+                        }
+                        != 0
+                    {
                         FLAG_NEGATIVE
                     } else {
                         0
@@ -1112,7 +1104,12 @@ impl Cpu65816 {
                     self.state.pc = self.state.pc.wrapping_add_signed(i16::from(offset));
                 }
                 cycles = 2 + u32::from(take);
-                if take && !self.same_page(self.state.pc, self.state.pc.wrapping_sub_signed(i16::from(offset))) {
+                if take
+                    && !self.same_page(
+                        self.state.pc,
+                        self.state.pc.wrapping_sub_signed(i16::from(offset)),
+                    )
+                {
                     cycles += 1;
                 }
             }
@@ -1188,7 +1185,11 @@ impl Cpu65816 {
                     &mut master_ticks,
                     &mut access_count,
                 );
-                let value = if opcode == 0x84 { self.state.y } else { self.state.x };
+                let value = if opcode == 0x84 {
+                    self.state.y
+                } else {
+                    self.state.x
+                };
                 self.write_value(
                     bus,
                     address,
@@ -1263,8 +1264,8 @@ impl Cpu65816 {
                 self.set_zero_negative(value, self.index_is_8_bit());
                 cycles = 3;
             }
-            0xa1 | 0xa7 | 0xb1 | 0xb2 | 0xb5 | 0xb7 | 0xb9 | 0xbd | 0xbf | 0x81 | 0x87
-            | 0x91 | 0x92 | 0x95 | 0x97 | 0x99 | 0x9d | 0x9f => {
+            0xa1 | 0xa7 | 0xb1 | 0xb2 | 0xb5 | 0xb7 | 0xb9 | 0xbd | 0xbf | 0x81 | 0x87 | 0x91
+            | 0x92 | 0x95 | 0x97 | 0x99 | 0x9d | 0x9f => {
                 let is_load = opcode >= 0xa0;
                 let address = match opcode & 0x1f {
                     0x01 => self.fetch_direct_indexed_indirect_address(
@@ -1363,7 +1364,11 @@ impl Cpu65816 {
             }
             0xb4 | 0xb6 | 0xbc | 0xbe | 0x94 | 0x96 | 0x9e => {
                 let index_is_x = matches!(opcode, 0xb4 | 0xbc | 0x94 | 0x9e);
-                let index = if index_is_x { self.state.x } else { self.state.y };
+                let index = if index_is_x {
+                    self.state.x
+                } else {
+                    self.state.y
+                };
                 let address = if opcode == 0xbc || opcode == 0xbe || opcode == 0x9e {
                     self.absolute_indexed_address(
                         bus,
@@ -1401,12 +1406,22 @@ impl Cpu65816 {
                     }
                     self.set_zero_negative(value, self.index_is_8_bit());
                 } else {
-                    let value = if opcode == 0x94 { self.state.y } else if opcode == 0x96 { self.state.x } else { 0 };
+                    let value = if opcode == 0x94 {
+                        self.state.y
+                    } else if opcode == 0x96 {
+                        self.state.x
+                    } else {
+                        0
+                    };
                     self.write_value(
                         bus,
                         address,
                         value,
-                        if opcode == 0x9e { self.accumulator_is_8_bit() } else { self.index_is_8_bit() },
+                        if opcode == 0x9e {
+                            self.accumulator_is_8_bit()
+                        } else {
+                            self.index_is_8_bit()
+                        },
                         &mut trace,
                         &mut master_ticks,
                         &mut access_count,
@@ -1444,7 +1459,11 @@ impl Cpu65816 {
                         self.set_zero_negative(value, self.index_is_8_bit());
                     }
                 } else {
-                    let value = if opcode == 0x8c { self.state.y } else { self.state.x };
+                    let value = if opcode == 0x8c {
+                        self.state.y
+                    } else {
+                        self.state.x
+                    };
                     self.write_value(
                         bus,
                         address,
@@ -1535,12 +1554,7 @@ impl Cpu65816 {
             }
             0x08 | 0x48 | 0x5a | 0xda => {
                 match opcode {
-                    0x08 => self.push_status(
-                        bus,
-                        &mut trace,
-                        &mut master_ticks,
-                        &mut access_count,
-                    ),
+                    0x08 => self.push_status(bus, &mut trace, &mut master_ticks, &mut access_count),
                     0x48 => self.push_word_or_byte(
                         bus,
                         self.state.a,
@@ -1578,8 +1592,10 @@ impl Cpu65816 {
                         &mut access_count,
                     ),
                     0x2b => {
-                        let low = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
-                        let high = self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                        let low =
+                            self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
+                        let high =
+                            self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                         self.state.direct_page = u16::from_le_bytes([low, high]);
                         self.set_zero_negative(self.state.direct_page, false);
                     }
@@ -1598,12 +1614,8 @@ impl Cpu65816 {
                         &mut access_count,
                     ),
                     0xab => {
-                        self.state.data_bank = self.pop_byte(
-                            bus,
-                            &mut trace,
-                            &mut master_ticks,
-                            &mut access_count,
-                        );
+                        self.state.data_bank =
+                            self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                         self.set_zero_negative(u16::from(self.state.data_bank), true);
                     }
                     0xd4 => {
@@ -1623,7 +1635,13 @@ impl Cpu65816 {
                             &mut master_ticks,
                             &mut access_count,
                         );
-                        self.push_word(bus, value, &mut trace, &mut master_ticks, &mut access_count);
+                        self.push_word(
+                            bus,
+                            value,
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
                     }
                     0xf4 => {
                         let value = self.fetch_word(
@@ -1633,7 +1651,13 @@ impl Cpu65816 {
                             &mut master_ticks,
                             &mut access_count,
                         );
-                        self.push_word(bus, value, &mut trace, &mut master_ticks, &mut access_count);
+                        self.push_word(
+                            bus,
+                            value,
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
                     }
                     _ => {
                         let offset = self.fetch_word(
@@ -1657,12 +1681,8 @@ impl Cpu65816 {
             0x28 | 0x68 | 0x7a | 0xfa => {
                 match opcode {
                     0x28 => {
-                        self.state.status = self.pop_byte(
-                            bus,
-                            &mut trace,
-                            &mut master_ticks,
-                            &mut access_count,
-                        );
+                        self.state.status =
+                            self.pop_byte(bus, &mut trace, &mut master_ticks, &mut access_count);
                         self.normalize_widths();
                     }
                     0x68 => {
@@ -1716,8 +1736,8 @@ impl Cpu65816 {
                 self.set_accumulator(value);
                 cycles = 2;
             }
-            0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x36 | 0x3e | 0x46 | 0x4e
-            | 0x56 | 0x5e | 0x66 | 0x6e | 0x76 | 0x7e => {
+            0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x36 | 0x3e | 0x46 | 0x4e | 0x56 | 0x5e
+            | 0x66 | 0x6e | 0x76 | 0x7e => {
                 let address = if opcode & 0x0f == 0x06 {
                     if opcode & 0x10 != 0 {
                         self.direct_indexed_address(
@@ -1827,7 +1847,11 @@ impl Cpu65816 {
                     value.wrapping_add(1)
                 } else {
                     value.wrapping_sub(1)
-                } & if self.accumulator_is_8_bit() { 0x00ff } else { 0xffff };
+                } & if self.accumulator_is_8_bit() {
+                    0x00ff
+                } else {
+                    0xffff
+                };
                 self.set_zero_negative(result, self.accumulator_is_8_bit());
                 self.write_value(
                     bus,
@@ -2053,28 +2077,34 @@ impl Cpu65816 {
         let rhs = u32::from(value & mask as u16);
         let carry = u32::from(self.state.status & FLAG_CARRY != 0);
         let binary_result = lhs + rhs + carry;
-        let (truncated, decimal_carry) = if self.state.status & 0x08 != 0 {
-            let mut decimal = lhs + rhs + carry;
+        let (truncated, decimal_carry, overflow_result) = if self.state.status & 0x08 != 0 {
+            let mut decimal = 0u32;
+            let mut overflow_result = 0u32;
+            let mut carry_digit = carry;
             let mut shift = 0;
             while shift < width {
-                let nibble = ((decimal >> shift) & 0x0f) as u8;
-                if nibble > 9 {
-                    decimal += 6 << shift;
+                let mut digit = ((lhs >> shift) & 0x0f) + ((rhs >> shift) & 0x0f) + carry_digit;
+                let unadjusted_digit = digit;
+                if digit > 9 {
+                    digit += 6;
+                    carry_digit = 1;
+                } else {
+                    carry_digit = 0;
                 }
+                if shift + 4 == width {
+                    overflow_result = decimal | (unadjusted_digit << shift);
+                }
+                decimal |= (digit & 0x0f) << shift;
                 shift += 4;
             }
-            (decimal & mask, decimal > mask)
+            (decimal & mask, carry_digit != 0, overflow_result)
         } else {
-            (binary_result & mask, binary_result > mask)
+            (binary_result & mask, binary_result > mask, binary_result)
         };
         let sign = 1u32 << (width - 1);
         self.state.status = (self.state.status & !(FLAG_CARRY | FLAG_OVERFLOW))
-            | if decimal_carry {
-                FLAG_CARRY
-            } else {
-                0
-            }
-            | if (!(lhs ^ rhs) & (lhs ^ (binary_result & mask)) & sign) != 0 {
+            | if decimal_carry { FLAG_CARRY } else { 0 }
+            | if (!(lhs ^ rhs) & (lhs ^ overflow_result) & sign) != 0 {
                 FLAG_OVERFLOW
             } else {
                 0
@@ -2099,7 +2129,7 @@ impl Cpu65816 {
                 let right = ((rhs >> shift) & 0x0f) as i32;
                 let mut digit = left - right - borrow_digit as i32;
                 if digit < 0 {
-                    digit += 10;
+                    digit -= 6;
                     borrow_digit = 1;
                 } else {
                     borrow_digit = 0;
@@ -2132,7 +2162,11 @@ impl Cpu65816 {
     }
 
     fn logic_acc(&mut self, value: u16, operation: impl FnOnce(u16, u16) -> u16) {
-        let mask = if self.accumulator_is_8_bit() { 0x00ff } else { 0xffff };
+        let mask = if self.accumulator_is_8_bit() {
+            0x00ff
+        } else {
+            0xffff
+        };
         let result = operation(self.state.a & mask, value & mask);
         self.set_accumulator(result);
         self.set_zero_negative(result, mask == 0x00ff);
@@ -2149,8 +2183,7 @@ impl Cpu65816 {
             0x40 => (value >> 1, value & 1 != 0),
             _ => (value >> 1 | (carry_in * sign), value & 1 != 0),
         };
-        self.state.status = (self.state.status & !FLAG_CARRY)
-            | if carry { FLAG_CARRY } else { 0 };
+        self.state.status = (self.state.status & !FLAG_CARRY) | if carry { FLAG_CARRY } else { 0 };
         self.set_zero_negative(result, eight_bit);
         result
     }
@@ -2159,8 +2192,8 @@ impl Cpu65816 {
         let mask = if eight_bit { 0x00ff } else { 0xffff };
         let left = lhs & mask;
         let right = rhs & mask;
-        self.state.status = (self.state.status & !FLAG_CARRY)
-            | if left >= right { FLAG_CARRY } else { 0 };
+        self.state.status =
+            (self.state.status & !FLAG_CARRY) | if left >= right { FLAG_CARRY } else { 0 };
         self.set_zero_negative(left.wrapping_sub(right), eight_bit);
     }
 
@@ -2177,7 +2210,9 @@ impl Cpu65816 {
         count: &mut u32,
     ) -> Address24 {
         let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
-        Address24::new(u32::from(self.state.direct_page.wrapping_add(u16::from(offset))))
+        Address24::new(u32::from(
+            self.state.direct_page.wrapping_add(u16::from(offset)),
+        ))
     }
 
     fn absolute_address(
@@ -2221,8 +2256,7 @@ impl Cpu65816 {
     ) -> Address24 {
         let offset = self.fetch_word(bus, trace, cycles, ticks, count);
         Address24::new(
-            (u32::from(self.state.data_bank) << 16)
-                | u32::from(offset.wrapping_add(index)),
+            (u32::from(self.state.data_bank) << 16) | u32::from(offset.wrapping_add(index)),
         )
     }
 
@@ -2334,8 +2368,7 @@ impl Cpu65816 {
             count,
         );
         Address24::new(
-            (u32::from(self.state.data_bank) << 16)
-                | u32::from(u16::from_le_bytes([low, high])),
+            (u32::from(self.state.data_bank) << 16) | u32::from(u16::from_le_bytes([low, high])),
         )
     }
 
@@ -2396,9 +2429,7 @@ impl Cpu65816 {
         let low = self.fetch_byte(bus, trace, cycles, ticks, count);
         let high = self.fetch_byte(bus, trace, cycles, ticks, count);
         let bank = self.fetch_byte(bus, trace, cycles, ticks, count);
-        Address24::new(
-            (u32::from(bank) << 16) | u32::from(u16::from_le_bytes([low, high])),
-        )
+        Address24::new((u32::from(bank) << 16) | u32::from(u16::from_le_bytes([low, high])))
     }
 
     fn read_value(
@@ -2808,6 +2839,55 @@ mod tests {
     }
 
     #[test]
+    fn decimal_adc_corrects_each_nibble_independently() {
+        let mut bus = FlatBus::new();
+        bus.memory[..4].copy_from_slice(&[0xf8, 0xa9, 0xd4, 0x69]);
+        bus.memory[4] = 0xa3;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0xd7);
+        assert_ne!(cpu.state().status & FLAG_CARRY, 0);
+    }
+
+    #[test]
+    fn decimal_adc_overflow_uses_the_intermediate_bcd_sum() {
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0x69, 0xa1]);
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            a: 0x04da,
+            pc: 0,
+            status: 0xb8,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a, 0x04e1);
+        assert_eq!(cpu.state().status, 0xb9);
+    }
+
+    #[test]
+    fn decimal_adc_overflow_can_differ_from_binary_sum() {
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0x69, 0x4a]);
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            a: 0xe031,
+            pc: 0,
+            status: 0x7f,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a, 0xe082);
+        assert_eq!(cpu.state().status, 0xfc);
+    }
+
+    #[test]
     fn direct_and_absolute_load_families_use_the_data_bank() {
         let mut bus = FlatBus::new();
         bus.memory[0] = 0xa5;
@@ -2845,9 +2925,8 @@ mod tests {
     #[test]
     fn shifts_rotate_through_carry_and_memory_inc_dec_set_flags() {
         let mut bus = FlatBus::new();
-        bus.memory[..10].copy_from_slice(&[
-            0x18, 0xa9, 0x81, 0x0a, 0x4a, 0x2a, 0x06, 0x10, 0xc6, 0x10,
-        ]);
+        bus.memory[..10]
+            .copy_from_slice(&[0x18, 0xa9, 0x81, 0x0a, 0x4a, 0x2a, 0x06, 0x10, 0xc6, 0x10]);
         bus.memory[0x10] = 4;
         let mut cpu = Cpu65816::default();
         for _ in 0..7 {
@@ -2984,7 +3063,10 @@ mod tests {
             trace.as_slice().last().map(|access| access.address),
             Some(Address24::new(0x002001))
         );
-        assert_eq!(trace.as_slice().last().and_then(|access| access.value), Some(0x77));
+        assert_eq!(
+            trace.as_slice().last().and_then(|access| access.value),
+            Some(0x77)
+        );
         assert_eq!(bus.memory[0x2001], 0x77);
         assert_eq!(cpu.state().a & 0xff, 0x77);
     }

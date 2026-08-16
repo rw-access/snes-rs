@@ -1,12 +1,13 @@
 //! Optional, manifest-driven acceptance runs for the pinned ROM corpus.
 //!
-//! This module deliberately has no third-party dependencies. It is therefore
-//! usable in an offline checkout and can emit lossless PPM/ARGB32 artifacts
-//! without making image decoding part of the normal workspace build.
+//! The image decoders are kept small and opt-in at the crate level. The
+//! harness can consume lossless PPM/ARGB32 references as well as PNG/JPEG
+//! captures while remaining usable in an offline checkout.
 
 use std::{
     collections::BTreeMap,
     fmt, fs,
+    io::Cursor,
     path::{Component, Path, PathBuf},
 };
 
@@ -23,6 +24,8 @@ const MANIFEST_VERSION: u64 = 1;
 pub enum ReferenceFormat {
     Ppm,
     Argb32,
+    Png,
+    Jpeg,
     Unsupported(String),
 }
 
@@ -31,6 +34,8 @@ impl ReferenceFormat {
         match value {
             "ppm" | "ppm-p6" => Self::Ppm,
             "argb32" | "raw-argb32" => Self::Argb32,
+            "png" => Self::Png,
+            "jpg" | "jpeg" => Self::Jpeg,
             other => Self::Unsupported(other.to_owned()),
         }
     }
@@ -624,7 +629,7 @@ fn decode_reference(
     match format {
         ReferenceFormat::Ppm => decode_ppm(bytes),
         ReferenceFormat::Argb32 => {
-            let pixel_count = usize::from(width) * usize::from(height);
+            let pixel_count = reference_pixel_count(width, height)?;
             if bytes.len() != pixel_count * 4 {
                 return Err(AcceptanceError::InvalidReference(format!(
                     "ARGB32 reference has {} bytes, expected {}",
@@ -642,10 +647,250 @@ fn decode_reference(
                 pixels,
             })
         }
+        ReferenceFormat::Png => decode_png(bytes, width, height),
+        ReferenceFormat::Jpeg => decode_jpeg(bytes, width, height),
         ReferenceFormat::Unsupported(format) => {
             Err(AcceptanceError::UnsupportedReference(format.clone()))
         }
     }
+}
+
+fn decode_png(
+    bytes: &[u8],
+    expected_width: u16,
+    expected_height: u16,
+) -> Result<DecodedReference, AcceptanceError> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    // Keep checksum validation enabled (the default), while normalizing the
+    // common indexed, low-bit-depth, and 16-bit PNG variants to 8-bit samples.
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder
+        .read_info()
+        .map_err(|error| AcceptanceError::InvalidReference(format!("PNG header: {error:?}")))?;
+    let (source_width, source_height) = reader.info().size();
+    let (width, height) = validate_decoded_dimensions(
+        source_width,
+        source_height,
+        expected_width,
+        expected_height,
+        "PNG",
+    )?;
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let output = reader
+        .next_frame(&mut buffer)
+        .map_err(|error| AcceptanceError::InvalidReference(format!("PNG image: {error:?}")))?;
+    let (color_type, bit_depth) = reader.output_color_type();
+    if bit_depth != png::BitDepth::Eight {
+        return Err(AcceptanceError::InvalidReference(format!(
+            "PNG decoder returned unsupported bit depth {bit_depth:?}"
+        )));
+    }
+    let data = &buffer[..output.buffer_size()];
+    let pixel_count = reference_pixel_count(width, height)?;
+    let pixels = match color_type {
+        png::ColorType::Rgb => {
+            if data.len() != pixel_count * 3 {
+                return Err(invalid_decoded_buffer(
+                    "PNG RGB",
+                    data.len(),
+                    pixel_count * 3,
+                ));
+            }
+            data.chunks_exact(3)
+                .map(|chunk| {
+                    0xff00_0000
+                        | (u32::from(chunk[0]) << 16)
+                        | (u32::from(chunk[1]) << 8)
+                        | u32::from(chunk[2])
+                })
+                .collect()
+        }
+        png::ColorType::Rgba => {
+            if data.len() != pixel_count * 4 {
+                return Err(invalid_decoded_buffer(
+                    "PNG RGBA",
+                    data.len(),
+                    pixel_count * 4,
+                ));
+            }
+            data.chunks_exact(4)
+                .map(|chunk| {
+                    (u32::from(chunk[3]) << 24)
+                        | (u32::from(chunk[0]) << 16)
+                        | (u32::from(chunk[1]) << 8)
+                        | u32::from(chunk[2])
+                })
+                .collect()
+        }
+        png::ColorType::Grayscale => {
+            if data.len() != pixel_count {
+                return Err(invalid_decoded_buffer(
+                    "PNG grayscale",
+                    data.len(),
+                    pixel_count,
+                ));
+            }
+            data.iter()
+                .copied()
+                .map(|gray| {
+                    0xff00_0000 | (u32::from(gray) << 16) | (u32::from(gray) << 8) | u32::from(gray)
+                })
+                .collect()
+        }
+        png::ColorType::GrayscaleAlpha => {
+            if data.len() != pixel_count * 2 {
+                return Err(invalid_decoded_buffer(
+                    "PNG grayscale-alpha",
+                    data.len(),
+                    pixel_count * 2,
+                ));
+            }
+            data.chunks_exact(2)
+                .map(|chunk| {
+                    (u32::from(chunk[1]) << 24)
+                        | (u32::from(chunk[0]) << 16)
+                        | (u32::from(chunk[0]) << 8)
+                        | u32::from(chunk[0])
+                })
+                .collect()
+        }
+        png::ColorType::Indexed => {
+            return Err(AcceptanceError::InvalidReference(
+                "PNG decoder returned an unexpanded indexed image".to_owned(),
+            ))
+        }
+    };
+    Ok(DecodedReference {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn decode_jpeg(
+    bytes: &[u8],
+    expected_width: u16,
+    expected_height: u16,
+) -> Result<DecodedReference, AcceptanceError> {
+    let expected_pixels = reference_pixel_count(expected_width, expected_height)?;
+    let max_decoded_bytes = expected_pixels.checked_mul(4).ok_or_else(|| {
+        AcceptanceError::InvalidReference("JPEG reference is too large".to_owned())
+    })?;
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+    decoder.set_max_decoding_buffer_size(max_decoded_bytes);
+    decoder
+        .read_info()
+        .map_err(|error| AcceptanceError::InvalidReference(format!("JPEG header: {error:?}")))?;
+    let info = decoder.info().ok_or_else(|| {
+        AcceptanceError::InvalidReference("JPEG decoder returned no image metadata".to_owned())
+    })?;
+    let (width, height) = validate_decoded_dimensions(
+        u32::from(info.width),
+        u32::from(info.height),
+        expected_width,
+        expected_height,
+        "JPEG",
+    )?;
+    let data = decoder
+        .decode()
+        .map_err(|error| AcceptanceError::InvalidReference(format!("JPEG image: {error:?}")))?;
+    let pixel_count = reference_pixel_count(width, height)?;
+    let pixels = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            if data.len() != pixel_count * 3 {
+                return Err(invalid_decoded_buffer(
+                    "JPEG RGB",
+                    data.len(),
+                    pixel_count * 3,
+                ));
+            }
+            data.chunks_exact(3)
+                .map(|chunk| {
+                    0xff00_0000
+                        | (u32::from(chunk[0]) << 16)
+                        | (u32::from(chunk[1]) << 8)
+                        | u32::from(chunk[2])
+                })
+                .collect()
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            if data.len() != pixel_count {
+                return Err(invalid_decoded_buffer(
+                    "JPEG grayscale",
+                    data.len(),
+                    pixel_count,
+                ));
+            }
+            data.iter()
+                .copied()
+                .map(|gray| {
+                    0xff00_0000 | (u32::from(gray) << 16) | (u32::from(gray) << 8) | u32::from(gray)
+                })
+                .collect()
+        }
+        jpeg_decoder::PixelFormat::L16 => {
+            if data.len() != pixel_count * 2 {
+                return Err(invalid_decoded_buffer(
+                    "JPEG 16-bit grayscale",
+                    data.len(),
+                    pixel_count * 2,
+                ));
+            }
+            data.chunks_exact(2)
+                .map(|chunk| {
+                    let gray = chunk[0];
+                    0xff00_0000 | (u32::from(gray) << 16) | (u32::from(gray) << 8) | u32::from(gray)
+                })
+                .collect()
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            return Err(AcceptanceError::InvalidReference(
+                "JPEG CMYK references are not supported; convert to RGB or grayscale".to_owned(),
+            ))
+        }
+    };
+    Ok(DecodedReference {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn validate_decoded_dimensions(
+    actual_width: u32,
+    actual_height: u32,
+    expected_width: u16,
+    expected_height: u16,
+    format: &str,
+) -> Result<(u16, u16), AcceptanceError> {
+    let width = u16::try_from(actual_width).map_err(|_| {
+        AcceptanceError::InvalidReference(format!(
+            "{format} width {actual_width} exceeds the descriptor range"
+        ))
+    })?;
+    let height = u16::try_from(actual_height).map_err(|_| {
+        AcceptanceError::InvalidReference(format!(
+            "{format} height {actual_height} exceeds the descriptor range"
+        ))
+    })?;
+    if width != expected_width || height != expected_height {
+        return Err(AcceptanceError::InvalidReference(format!(
+            "{format} dimensions are {width}x{height}, descriptor requires {expected_width}x{expected_height}"
+        )));
+    }
+    Ok((width, height))
+}
+
+fn reference_pixel_count(width: u16, height: u16) -> Result<usize, AcceptanceError> {
+    usize::from(width)
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| AcceptanceError::InvalidReference("reference is too large".to_owned()))
+}
+
+fn invalid_decoded_buffer(format: &str, actual: usize, expected: usize) -> AcceptanceError {
+    AcceptanceError::InvalidReference(format!(
+        "{format} decoder returned {actual} bytes, expected {expected}"
+    ))
 }
 
 fn decode_ppm(bytes: &[u8]) -> Result<DecodedReference, AcceptanceError> {
@@ -1161,10 +1406,7 @@ artifact = "cpuadc"
         .unwrap();
         let case = manifest.case("cpuadc").unwrap();
         assert_eq!(case.source_id, "peterlemon-snes");
-        assert_eq!(
-            case.reference_format,
-            ReferenceFormat::Unsupported("png".to_owned())
-        );
+        assert_eq!(case.reference_format, ReferenceFormat::Png);
         assert!(case.diagnostic_only);
         assert!(case.mask_path.is_none());
     }
@@ -1176,6 +1418,93 @@ artifact = "cpuadc"
         assert_eq!(decoded.width, 2);
         assert_eq!(decoded.height, 1);
         assert_eq!(decoded.pixels.len(), 2);
+    }
+
+    fn encoded_rgb_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0xff, 0, 0, 0, 0xff, 0]).unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn png_reference_decodes_pixels_and_checks_dimensions() {
+        let bytes = encoded_rgb_png();
+        let decoded = decode_reference(&ReferenceFormat::Png, &bytes, 2, 1).unwrap();
+        assert_eq!(decoded.width, 2);
+        assert_eq!(decoded.height, 1);
+        assert_eq!(decoded.pixels, vec![0xffff_0000, 0xff00_ff00]);
+
+        let error = decode_reference(&ReferenceFormat::Png, &bytes, 1, 2).unwrap_err();
+        assert!(error.to_string().contains("dimensions"));
+    }
+
+    #[test]
+    fn png_reference_rejects_corrupt_chunk_checksum() {
+        let mut bytes = encoded_rgb_png();
+        let mut position = 8;
+        let mut corrupted = false;
+        while position + 12 <= bytes.len() {
+            let length = u32::from_be_bytes([
+                bytes[position],
+                bytes[position + 1],
+                bytes[position + 2],
+                bytes[position + 3],
+            ]) as usize;
+            let chunk_type = &bytes[position + 4..position + 8];
+            let crc = position + 8 + length;
+            if chunk_type == b"IDAT" {
+                bytes[crc] ^= 1;
+                corrupted = true;
+                break;
+            }
+            position = crc + 4;
+        }
+        assert!(corrupted);
+        assert!(decode_reference(&ReferenceFormat::Png, &bytes, 2, 1).is_err());
+    }
+
+    #[test]
+    fn jpeg_reference_decodes_rgb_and_checks_dimensions() {
+        // A valid 2x1 baseline RGB JPEG generated by ffmpeg. JPEG is lossy,
+        // so the assertion checks the decoded color family rather than exact RGB.
+        let bytes = [
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x02, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x10, 0x4c, 0x61, 0x76, 0x63,
+            0x36, 0x32, 0x2e, 0x32, 0x38, 0x2e, 0x31, 0x30, 0x32, 0x00, 0xff, 0xdb, 0x00, 0x43,
+            0x00, 0x08, 0x04, 0x04, 0x04, 0x04, 0x04, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x06,
+            0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x07, 0x07,
+            0x07, 0x08, 0x08, 0x08, 0x07, 0x07, 0x07, 0x06, 0x06, 0x07, 0x07, 0x08, 0x08, 0x08,
+            0x08, 0x09, 0x09, 0x09, 0x08, 0x08, 0x08, 0x08, 0x09, 0x09, 0x0a, 0x0a, 0x0a, 0x0c,
+            0x0c, 0x0b, 0x0b, 0x0e, 0x0e, 0x0e, 0x11, 0x11, 0x14, 0xff, 0xc4, 0x00, 0x4c, 0x00,
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x06, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x07, 0x10, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x02, 0x03, 0x01,
+            0x22, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01,
+            0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0x8b, 0x00, 0x4d, 0x7f, 0x7f, 0xff,
+            0xd9,
+        ];
+        let decoded = decode_reference(&ReferenceFormat::Jpeg, &bytes, 2, 1).unwrap();
+        assert_eq!(decoded.width, 2);
+        assert_eq!(decoded.height, 1);
+        assert_eq!(decoded.pixels.len(), 2);
+        for pixel in decoded.pixels {
+            assert_eq!(pixel >> 24, 0xff);
+            assert!(pixel >> 16 & 0xff > 100);
+            assert!(pixel >> 8 & 0xff < 100);
+            assert!(pixel & 0xff < 100);
+        }
+
+        let error = decode_reference(&ReferenceFormat::Jpeg, &bytes, 1, 2).unwrap_err();
+        assert!(error.to_string().contains("dimensions"));
     }
 
     #[test]

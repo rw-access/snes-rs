@@ -89,11 +89,14 @@ unsupported reference format into a correctness claim. Artifacts are written
 under `target/snes-acceptance/<case>/` as lossless PPM plus metadata and, on a
 mismatch, a deterministic PPM diff.
 
-The harness currently decodes binary P6 PPM and little-endian ARGB32 reference
-files. The pinned corpus's PNG/JPEG captures are retained as provenance and are
-diagnostic-only until an image decoder is deliberately added; their checksums
-are still verified. `--case` may explicitly run a disabled diagnostic case
-without changing its manifest status.
+The harness decodes binary P6 PPM, little-endian ARGB32, PNG, and JPEG reference
+files. A strict case may therefore use a pinned PNG/JPEG capture, subject to
+the descriptor's dimensions, tolerance, mask, and optional reference
+SHA-256. PNG chunk checksums are verified by the decoder. This format support
+does not make a case an oracle: an enabled case still needs a valid, matching
+reference and a documented result/frame contract. Cases whose expected output
+or tolerance/mask is not understood remain diagnostic-only. `--case` may
+explicitly run a disabled diagnostic case without changing its manifest status.
 
 ## Provenance and legal assumptions
 
@@ -135,7 +138,20 @@ Its `ticks=... stopped=...` output proves only that loading and bounded
 execution completed. `stopped=true` is not a correctness result, and
 `stopped=false` is not a failure. It does not capture a frame or compare an
 image. Use `snes-acceptance` for descriptor-driven frame oracles; it still does
-not run the SingleStepTests JSON vectors. The limit is instruction/DMA-
+not run the SingleStepTests JSON vectors. The opt-in JSON-vector command is:
+
+```sh
+cargo run -p snes-render --bin snes-65816-conformance -- \
+  tests/snes-test-roms/materialized/singlesteptests-65816/v1/69.e.json \
+  --limit 100
+```
+
+It compares the vector's initial/final CPU state and sparse RAM cells against
+the real 65816 engine and emits field/address-level diagnostics. It parses the
+expected bus-cycle records but does not compare them, because the current
+engine's timing/access model is intentionally not cycle-accurate. It is
+therefore an opt-in semantic conformance harness, not yet a full-corpus pass;
+unsupported bootstrap or CPU behavior exits nonzero. The limit is instruction/DMA-
 granular, so the reported tick count may exceed the requested bound and is
 reported as evidence, not as a cycle-accuracy result. The runner's mapping
 descriptor is not yet an applied mapping override.
@@ -154,6 +170,7 @@ harness rather than inferred from filenames, containing:
 
 For deterministic lossless cases, the default gate is exact dimensions and
 zero per-channel tolerance. Any relaxation must be justified in the descriptor.
-PNG/JPEG references, converted captures, and documented glitch cases stay
-diagnostic until their format and tolerance/mask are reproducible. A ROM
-reaching a stop instruction is never a substitute for this frame comparison.
+PNG/JPEG references can be strict when their dimensions and comparison policy
+are reproducible. Converted captures and documented glitch cases stay
+diagnostic until their tolerance/mask and oracle are justified. A ROM reaching
+a stop instruction is never a substitute for this frame comparison.

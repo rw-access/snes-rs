@@ -209,11 +209,13 @@ impl RomOnlyCartridge {
         let offset = raw & 0xffff;
         let byte = match self.rom.metadata().mapping {
             MappingMode::LoRom
-                if (0x70..=0x7d).contains(&bank) || (0xf0..=0xff).contains(&bank) => {
+                if (0x70..=0x7d).contains(&bank) || (0xf0..=0xff).contains(&bank) =>
+            {
                 (bank.saturating_sub(0x70)) * 0x8000 + offset
             }
             MappingMode::HiRom
-                if (0x20..=0x3f).contains(&bank) || (0xa0..=0xbf).contains(&bank) => {
+                if (0x20..=0x3f).contains(&bank) || (0xa0..=0xbf).contains(&bank) =>
+            {
                 if !(0x6000..=0x7fff).contains(&offset) {
                     return None;
                 }

@@ -27,7 +27,15 @@ pub struct Ppu {
     pub oam_address: u16,
     pub tm: u8,
     pub ts: u8,
+    pub tmw: u8,
+    pub tsw: u8,
     pub obsel: u8,
+    pub w12sel: u8,
+    pub w34sel: u8,
+    pub wobjsel: u8,
+    pub wh: [u8; 4],
+    pub wbglog: u8,
+    pub wobjlog: u8,
     pub m7sel: u8,
     pub m7a: i16,
     pub m7b: i16,
@@ -67,7 +75,15 @@ impl Default for Ppu {
             oam_address: 0,
             tm: 0,
             ts: 0,
+            tmw: 0,
+            tsw: 0,
             obsel: 0,
+            w12sel: 0,
+            w34sel: 0,
+            wobjsel: 0,
+            wh: [0; 4],
+            wbglog: 0,
+            wobjlog: 0,
             m7sel: 0,
             m7a: 0x0100,
             m7b: 0,
@@ -130,6 +146,16 @@ impl Ppu {
             0x2105 => self.bgmode,
             0x212c => self.tm,
             0x212d => self.ts,
+            0x2123 => self.w12sel,
+            0x2124 => self.w34sel,
+            0x2125 => self.wobjsel,
+            0x2126..=0x2129 => self.wh[usize::from(address - 0x2126)],
+            0x212a => self.wbglog,
+            0x212b => self.wobjlog,
+            0x212e => self.tmw,
+            0x212f => self.tsw,
+            0x2130 => self.cgwsel,
+            0x2131 => self.cgadsub,
             _ => 0,
         }
     }
@@ -192,6 +218,14 @@ impl Ppu {
             }
             0x212c => self.tm = value,
             0x212d => self.ts = value,
+            0x2123 => self.w12sel = value,
+            0x2124 => self.w34sel = value,
+            0x2125 => self.wobjsel = value,
+            0x2126..=0x2129 => self.wh[usize::from(address - 0x2126)] = value,
+            0x212a => self.wbglog = value,
+            0x212b => self.wobjlog = value,
+            0x212e => self.tmw = value,
+            0x212f => self.tsw = value,
             0x2130 => self.cgwsel = value,
             0x2131 => self.cgadsub = value,
             0x2132 => {
@@ -247,6 +281,9 @@ impl Ppu {
                     if self.tm & (1 << layer) == 0 {
                         continue;
                     }
+                    if self.tmw & (1 << layer) != 0 && self.window_hides(layer, x) {
+                        continue;
+                    }
                     let (color, tile_priority) = self.bg_pixel(layer, x, y, high);
                     let priority = self.mode0_bg_priority(layer, tile_priority);
                     if color != 0 && tile_priority == high && priority > selected_priority {
@@ -268,13 +305,21 @@ impl Ppu {
                         }
                     }
                 }
+                let selected = if self.main_color_window_black(x) {
+                    0
+                } else {
+                    selected
+                };
                 pixels[y * SCREEN_WIDTH + x] =
-                    self.color_to_rgba(self.apply_color_math(selected, selected_source));
+                    self.color_to_rgba(self.apply_color_math_at(selected, selected_source, x));
             }
         }
     }
 
     fn obj_pixel(&self, x: usize, y: usize) -> Option<(u16, u8, usize)> {
+        if self.tmw & 0x10 != 0 && self.window_hides(4, x) {
+            return None;
+        }
         let mut selected: Option<(u16, u8, usize)> = None;
         for index in 0..128 {
             let sprite = self.decode_sprite(index);
@@ -453,8 +498,11 @@ impl Ppu {
         usize::from(nibble) << 12
     }
 
-    fn apply_color_math(&self, color: u16, source: u8) -> u16 {
+    fn apply_color_math_at(&self, color: u16, source: u8, x: usize) -> u16 {
         if self.cgadsub & source == 0 {
+            return color;
+        }
+        if !self.color_math_allowed(x) {
             return color;
         }
         let fixed = self.fixed_color;
@@ -475,6 +523,68 @@ impl Ppu {
         channel(color & 0x1f, fixed & 0x1f)
             | (channel((color >> 5) & 0x1f, (fixed >> 5) & 0x1f) << 5)
             | (channel((color >> 10) & 0x1f, (fixed >> 10) & 0x1f) << 10)
+    }
+
+    /// Returns whether a configured window hides `layer` at this pixel.
+    /// Layers 0..=3 are BG1..BG4, layer 4 is OBJ, and layer 5 is the color
+    /// window.  The result is the window effect (one means hide), matching
+    /// the PPU's window-mask terminology.
+    fn window_hides(&self, layer: usize, x: usize) -> bool {
+        let (settings, logic, settings_shift) = match layer {
+            0 => (self.w12sel, self.wbglog & 0x03, 0),
+            1 => (self.w12sel, (self.wbglog >> 2) & 0x03, 4),
+            2 => (self.w34sel, (self.wbglog >> 4) & 0x03, 0),
+            3 => (self.w34sel, (self.wbglog >> 6) & 0x03, 4),
+            4 => (self.wobjsel, self.wobjlog & 0x03, 0),
+            5 => (self.wobjsel, (self.wobjlog >> 2) & 0x03, 4),
+            _ => return false,
+        };
+        let first = self.window_signal(settings, 0, x, settings_shift);
+        let second = self.window_signal(settings, 1, x, settings_shift);
+        match logic {
+            0 => first || second,
+            1 => first && second,
+            2 => first ^ second,
+            _ => first == second,
+        }
+    }
+
+    fn window_signal(&self, settings: u8, window: usize, x: usize, shift: u8) -> bool {
+        let bits = (settings >> (shift + (window as u8 * 2))) & 0x03;
+        if bits & 0x01 == 0 {
+            return false;
+        }
+        let left = usize::from(self.wh[window * 2]);
+        let right = usize::from(self.wh[window * 2 + 1]);
+        let inside = left <= right && (left..=right).contains(&x);
+        if bits & 0x02 != 0 {
+            !inside
+        } else {
+            inside
+        }
+    }
+
+    fn color_window_region(&self, x: usize) -> bool {
+        self.window_hides(5, x)
+    }
+
+    fn region_applies(mode: u8, inside: bool) -> bool {
+        match mode {
+            0 => false,
+            1 => !inside,
+            2 => inside,
+            _ => true,
+        }
+    }
+
+    fn main_color_window_black(&self, x: usize) -> bool {
+        let mode = (self.cgwsel >> 6) & 0x03;
+        Self::region_applies(mode, self.color_window_region(x))
+    }
+
+    fn color_math_allowed(&self, x: usize) -> bool {
+        let mode = (self.cgwsel >> 4) & 0x03;
+        !Self::region_applies(mode, self.color_window_region(x))
     }
 
     fn render_mode7(&self, pixels: &mut [u32]) {
@@ -511,8 +621,13 @@ impl Ppu {
                     + (usize::try_from(source_y).unwrap_or(0) & 7) * 8
                     + (usize::try_from(source_x).unwrap_or(0) & 7);
                 let color = (self.vram[pixel_index & 0x7fff] & 0x00ff) as u8;
-                if color != 0 {
-                    let color = self.apply_color_math(self.cgram[usize::from(color)], 0x01);
+                if color != 0 && (self.tmw & 0x01 == 0 || !self.window_hides(0, x)) {
+                    let color = if self.main_color_window_black(x) {
+                        0
+                    } else {
+                        self.cgram[usize::from(color)]
+                    };
+                    let color = self.apply_color_math_at(color, 0x01, x);
                     pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
                 }
             }
@@ -753,9 +868,108 @@ mod tests {
         let mut ppu = Ppu::default();
         ppu.cgadsub = 0x20;
         ppu.fixed_color = 0x0010;
-        assert_eq!(ppu.apply_color_math(0x0010, 0x20), 0x001f);
+        assert_eq!(ppu.apply_color_math_at(0x0010, 0x20, 0), 0x001f);
 
         ppu.cgadsub = 0xa0;
-        assert_eq!(ppu.apply_color_math(0x0010, 0x20), 0);
+        assert_eq!(ppu.apply_color_math_at(0x0010, 0x20, 0), 0);
+    }
+
+    fn opaque_bg1_row(color: u16) -> Ppu {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x01;
+        ppu.cgram[1] = color;
+        ppu.vram[0] = 1;
+        ppu.vram[16] = 0x00ff;
+        ppu
+    }
+
+    #[test]
+    fn window_mask_hides_bg_pixels_and_combines_two_windows() {
+        let mut ppu = opaque_bg1_row(0x001f);
+        ppu.write_register(0x2123, 0x05); // BG1: enable windows 1 and 2.
+        ppu.write_register(0x2126, 1);
+        ppu.write_register(0x2127, 2);
+        ppu.write_register(0x2128, 5);
+        ppu.write_register(0x2129, 6);
+        ppu.write_register(0x212e, 0x01); // Apply BG1's window to the main screen.
+        assert_eq!(ppu.read_register(0x2123), 0x05);
+        assert_eq!(ppu.read_register(0x2128), 5);
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        let red = ppu.color_to_rgba(0x001f);
+        let black = ppu.color_to_rgba(0);
+        for x in 0..8 {
+            let expected = if (1..=2).contains(&x) || (5..=6).contains(&x) {
+                black
+            } else {
+                red
+            };
+            assert_eq!(frame[x], expected, "unexpected BG1 window result at x={x}");
+        }
+
+        // AND with an inverted second window leaves only the first window's
+        // pixels hidden in this non-overlapping setup.
+        ppu.wbglog = 0x01;
+        ppu.w12sel = 0x0d; // Window 2 enabled and inverted.
+        frame.fill(0);
+        ppu.render_frame(&mut frame);
+        for x in 0..8 {
+            let expected = if (1..=2).contains(&x) { black } else { red };
+            assert_eq!(
+                frame[x], expected,
+                "unexpected AND/inverted result at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn color_window_can_reject_color_math_inside_its_region() {
+        let mut ppu = opaque_bg1_row(0x0010);
+        ppu.fixed_color = 0x000f;
+        ppu.cgadsub = 0x01; // Add fixed color to BG1.
+        ppu.cgwsel = 0x20; // Make the color window's inside region transparent to math.
+        ppu.wobjsel = 0x10; // Enable color window 1.
+        ppu.wh = [2, 3, 0, 0];
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        let blended = ppu.color_to_rgba(0x001f);
+        let original = ppu.color_to_rgba(0x0010);
+        for x in 0..8 {
+            let expected = if (2..=3).contains(&x) {
+                original
+            } else {
+                blended
+            };
+            assert_eq!(
+                frame[x], expected,
+                "unexpected color-window result at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_color_window_blacks_the_selected_region() {
+        let mut ppu = opaque_bg1_row(0x001f);
+        ppu.cgwsel = 0x40; // Black the outside of the color window.
+        ppu.wobjsel = 0x10;
+        ppu.wh = [2, 3, 0, 0];
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        let red = ppu.color_to_rgba(0x001f);
+        let black = ppu.color_to_rgba(0);
+        for x in 0..8 {
+            let expected = if (2..=3).contains(&x) { red } else { black };
+            assert_eq!(
+                frame[x], expected,
+                "unexpected main color-window result at x={x}"
+            );
+        }
     }
 }

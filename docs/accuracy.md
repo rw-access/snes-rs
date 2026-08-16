@@ -29,7 +29,7 @@ accepted according to their role:
 | Corpus material | Acceptance role | Required evidence | Current status |
 | --- | --- | --- | --- |
 | `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Not wired into a repository test yet. |
-| `peterlemon-snes/CPUTest/CPU/*.sfc` with its sibling `.png` | CPU/PPU integration | Run the matching ROM to its documented result, capture a declared frame, and compare the matching lossless reference. | The optional acceptance runner captures frames and compares PPM/ARGB32 references; the pinned PNG examples remain diagnostic. |
+| `peterlemon-snes/CPUTest/CPU/*.sfc` with its sibling `.png` | CPU/PPU integration | Run the matching ROM to its documented result, capture a declared frame, and compare the matching lossless reference. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; the pinned PNG examples remain diagnostic until their cases have valid enabled oracles. |
 | Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | No generic pass rule exists; bounded execution is diagnostic only. |
 | `.spc`, `.bin`, source files, and standalone image/audio fixtures | Subsystem fixture | Consume them only through the subsystem-specific harness that defines their format and oracle. | Must not be passed to the SNES boot-ROM runner as a suite. |
 
@@ -76,26 +76,62 @@ Each visual test must record:
 
 For the ordinary NTSC baseline, a reference must normally be 256x224. A test
 must still record its actual dimensions because hires, interlace, and external
-captures may differ. PNG references can be strict golden tests only after the
-renderer and frame boundary are deterministic; the default PNG tolerance is
-zero. JPEG references, format-converted captures, and tests involving documented
-hardware glitches remain diagnostic until a justified tolerance/mask is
-recorded.
+captures may differ. PNG and JPEG references can be strict golden tests after
+the renderer and frame boundary are deterministic; the default PNG tolerance
+is zero, while JPEG normally needs a justified tolerance. Format-converted
+captures and tests involving documented hardware glitches remain diagnostic
+until a justified tolerance/mask and result oracle are recorded.
 
 A visual gate must fail on a dimension, frame-selection, or pixel mismatch. The
 acceptance runner preserves the actual frame and, on mismatch, a deterministic
 diff image together with case metadata under
 `target/snes-acceptance/<case>/`. The comparator supports an explicit
-one-byte-per-pixel mask. The harness currently decodes binary P6 PPM and
-little-endian ARGB32 references; PNG/JPEG corpus captures remain diagnostic
-until a decoder is deliberately added, so no pinned visual ROM is currently an
-enabled strict golden gate.
+one-byte-per-pixel mask. The harness decodes binary P6 PPM, little-endian
+ARGB32, PNG, and JPEG references, with reference dimensions checked before
+comparison and supplied reference SHA-256 values checked before decoding. PNG
+chunk checksums are also verified by the PNG decoder. No pinned visual ROM is
+currently an enabled strict golden gate: decoder support alone is not a valid
+oracle, and each enabled case still needs a matching expected capture plus a
+documented tolerance/mask and result contract.
 
 Before enabling one, the harness must prove determinism by running the same ROM
 and input sequence twice from reset and comparing the captured frame and the
 relevant machine-state/result oracle. `run_for_frames` plus `next_frame` is not
 yet sufficient evidence by itself: the current frame duration is an approximate
 bound and scanline/VBlank frame synchronization is still incomplete.
+
+## Optional 65816 JSON-vector runner
+
+The pinned SingleStepTests corpus can be exercised without making it an
+ordinary Rust test input:
+
+```sh
+cargo run -p snes-render --bin snes-65816-conformance -- \
+  tests/snes-test-roms/materialized/singlesteptests-65816/v1/69.e.json \
+  --limit 100
+```
+
+The runner parses the upstream array schema explicitly, rejecting missing or
+unknown fields, duplicate RAM addresses, out-of-range integers, malformed
+cycles, and trailing JSON. For each selected vector it initializes a sparse
+24-bit bus, runs the real public 65816 CPU engine for one measured instruction,
+and compares `a`, `x`, `y`, `s`, `d`, `dbr`, `pbr`, `pc`, `p`, `e`, waiting/stopped
+state, expected final RAM cells, and unexpected writes. Failures identify the
+vector, register field or six-digit address, expected value, and actual value.
+Directories of `.json` files, substring filtering, a global limit, and
+`--fail-fast` are supported. A nonzero exit status means a mismatch or an
+unsupported bootstrap; it is suitable as an opt-in CI gate only after the
+selected opcode coverage is known.
+
+The bootstrap is reversible and exists only because the public CPU API exposes
+state observation but not arbitrary register injection: it loads the vector
+state through real instructions, restores bootstrap memory, then measures the
+target instruction. It is not included in the measured result. Bus-cycle tags
+are parsed and counted for diagnostics, but are not compared: this emulator's
+timing/access model is intentionally not cycle-accurate. The runner therefore
+does not claim full SingleStepTests coverage, interrupt/vector timing coverage,
+or a passing corpus until all vectors are selected and pass with cycle checks
+implemented separately.
 
 ## Current implementation boundary
 
