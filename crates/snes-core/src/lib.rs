@@ -5,6 +5,7 @@
 //! milestones.
 
 pub mod bus;
+pub mod apu;
 pub mod cartridge;
 pub mod console;
 pub mod controller;
@@ -16,6 +17,7 @@ pub mod rewind;
 pub mod video;
 
 pub use bus::{AccessSpeed, Address24, BusAccess, BusAccessKind, TraceSink, VecTrace};
+pub use apu::Apu;
 pub use cartridge::{CartridgeDevice, LoadError, MappingMode, RomImage, RomMetadata};
 pub use console::{
     Console, ConsoleState, RestoreError, TimingState, MASTER_TICKS_PER_FRAME, SNAPSHOT_VERSION,

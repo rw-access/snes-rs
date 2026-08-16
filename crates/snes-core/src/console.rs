@@ -1,6 +1,7 @@
 //! Complete-machine ownership boundary.
 
 use crate::{
+    apu::Apu,
     bus::{Address24, TraceSink},
     cartridge::{CartridgeDevice, LoadError, RomImage, RomOnlyCartridge},
     controller::ControllerState,
@@ -27,6 +28,7 @@ pub struct Console {
     controller: ControllerState,
     timing: TimingState,
     framebuffer: Vec<u32>,
+    apu: Apu,
 }
 
 impl Console {
@@ -47,6 +49,7 @@ impl Console {
             controller: ControllerState::default(),
             timing: TimingState::default(),
             framebuffer: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT],
+            apu: Apu::default(),
         })
     }
 
@@ -58,12 +61,14 @@ impl Console {
         self.controller = ControllerState::default();
         self.timing = TimingState::default();
         self.framebuffer.fill(0);
+        self.apu = Apu::default();
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
             ppu: &mut self.ppu,
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
+            apu: &mut self.apu,
         };
         self.cpu.reset_with_bus(&mut bus);
     }
@@ -76,6 +81,7 @@ impl Console {
             ppu: &mut self.ppu,
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
+            apu: &mut self.apu,
         };
         let step = self.cpu.step_with_bus(&mut bus, None);
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
@@ -91,6 +97,7 @@ impl Console {
             ppu: &mut self.ppu,
             controller: &mut self.controller,
             dma: Some(&mut self.dma),
+            apu: &mut self.apu,
         };
         let step = self.cpu.step_with_bus(&mut bus, Some(trace));
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
@@ -112,6 +119,7 @@ impl Console {
             ppu: &mut self.ppu,
             controller: &mut self.controller,
             dma: None,
+            apu: &mut self.apu,
         };
         let transfers = dma.execute(pending, &mut bus);
         drop(bus);
@@ -176,6 +184,7 @@ impl Console {
             cpu: self.cpu.snapshot(),
             wram: self.wram.clone(),
             cartridge: self.cartridge.save_state(),
+            apu: self.apu.clone(),
             ppu: self.ppu.clone(),
             dma: self.dma,
             controller: self.controller,
@@ -200,6 +209,7 @@ impl Console {
         self.wram.copy_from_slice(&state.wram);
         self.ppu = state.ppu.clone();
         self.dma = state.dma;
+        self.apu = state.apu.clone();
         self.controller = state.controller;
         self.timing = state.timing;
         Ok(())
@@ -212,6 +222,7 @@ struct ConsoleBus<'a> {
     ppu: &'a mut Ppu,
     controller: &'a mut ControllerState,
     dma: Option<&'a mut Dma>,
+    apu: &'a mut Apu,
 }
 
 impl CpuBus for ConsoleBus<'_> {
@@ -226,6 +237,9 @@ impl CpuBus for ConsoleBus<'_> {
         if raw & 0xffff == 0x4016 {
             return self.controller.read_serial();
         }
+        if let Some(port) = apu_port(raw) {
+            return self.apu.read_cpu_port(port);
+        }
         self.cartridge.read(address)
     }
 
@@ -237,6 +251,8 @@ impl CpuBus for ConsoleBus<'_> {
             self.ppu.write_register(register, value);
         } else if raw & 0xffff == 0x4016 {
             self.controller.write_strobe(value);
+        } else if let Some(port) = apu_port(raw) {
+            self.apu.write_cpu_port(port, value);
         } else if let Some(dma) = self.dma.as_deref_mut() {
             if (0x4200..=0x437f).contains(&(raw as u16)) {
                 dma.write_register(raw as u16, value);
@@ -247,6 +263,14 @@ impl CpuBus for ConsoleBus<'_> {
             self.cartridge.write(address, value);
         }
     }
+}
+
+fn apu_port(address: u32) -> Option<usize> {
+    let bank = address >> 16;
+    let offset = address & 0xffff;
+    ((bank <= 0x3f || (0x80..=0xbf).contains(&bank))
+        && (0x2140..=0x2143).contains(&offset))
+        .then_some((offset - 0x2140) as usize)
 }
 
 fn ppu_register(address: u32) -> Option<u16> {
@@ -279,6 +303,7 @@ pub struct ConsoleState {
     pub cpu: CpuState,
     pub wram: Vec<u8>,
     pub cartridge: Vec<u8>,
+    pub apu: Apu,
     pub ppu: Ppu,
     pub dma: Dma,
     pub controller: ControllerState,
@@ -362,6 +387,7 @@ mod tests {
             ppu: &mut console.ppu,
             controller: &mut console.controller,
             dma: Some(&mut console.dma),
+            apu: &mut console.apu,
         };
         bus.write(Address24::new(0x000123), 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x7e0123)), 0xa5);
