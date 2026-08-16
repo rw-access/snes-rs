@@ -15,5 +15,21 @@ use. The initial scaffold does not implement hardware behavior.
 ## Test policy
 
 Normal `cargo test --workspace` must remain runnable without downloading ROMs.
-External ROMs belong under `tests/snes-test-roms/` only when a later task pins a
-specific corpus and documents its source and revision.
+External ROMs are pinned in `tests/snes-test-roms/sources.json`, fetched only
+through the opt-in script, and never required by ordinary tests.
+
+## Visual acceptance contract
+
+PPU tests are not considered passing merely because a ROM reaches a stop state.
+Each visual test must record:
+
+- the immutable ROM source and revision;
+- the frame number captured after reset and input setup;
+- output dimensions and pixel format;
+- a lossless reference image where possible;
+- an explicit per-pixel tolerance and any masked unstable region.
+
+PNG references can be strict golden tests after the renderer is deterministic.
+JPEG references and tests involving documented hardware glitches remain
+diagnostic until a tolerance/mask is recorded. A visual mismatch must preserve
+the actual frame and a diff image as test artifacts for review.
