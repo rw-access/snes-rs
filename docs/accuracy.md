@@ -1,7 +1,9 @@
 # Accuracy ledger
 
 This document records the sources of truth that future implementations should
-use. The initial scaffold does not implement hardware behavior.
+use. The implementation is intentionally incremental; the ledger distinguishes
+tested behavior from remaining accuracy work rather than treating a ROM that
+merely runs as a compatibility pass.
 
 | Subsystem | Primary references | Planned evidence |
 | --- | --- | --- |
@@ -33,3 +35,21 @@ PNG references can be strict golden tests after the renderer is deterministic.
 JPEG references and tests involving documented hardware glitches remain
 diagnostic until a tolerance/mask is recorded. A visual mismatch must preserve
 the actual frame and a diff image as test artifacts for review.
+
+## Current implementation boundary
+
+Implemented and covered by ordinary workspace tests:
+
+- 65816 state, a broad immediate/direct/absolute/long/indirect execution slice,
+  stack/control flow, decimal ALU operations, block moves, interrupts, and
+  ordered bus traces;
+- LoROM/HiROM loading, copier-header stripping, SRAM windows, WRAM mirrors,
+  controller serial input, general DMA, and full-state rewind checkpoints;
+- PPU register latches, VRAM/CGRAM/OAM storage, a deterministic Mode 0 BG1
+  renderer, bounded frame execution, and tolerant frame comparison;
+- APU port/DSP-register state and an initial SPC700 execution subset.
+
+Remaining before claiming broad emulator compatibility: complete 65816 and
+SPC700 opcode coverage, scanline-level timing and HDMA, sprites/windows/color
+math/Mode 7, DSP voice mixing, enhancement-chip cartridges, and pinned ROM
+expected-result plus visual golden runs.
