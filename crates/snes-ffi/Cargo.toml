@@ -1,0 +1,13 @@
+[package]
+name = "snes-ffi"
+version = "0.1.0"
+description = "Opaque C ABI for the SNES emulator core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+snes-core = { path = "../snes-core" }
