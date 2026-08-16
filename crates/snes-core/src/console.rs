@@ -58,6 +58,7 @@ impl Console {
             cartridge: &mut *self.cartridge,
             ppu: &mut self.ppu,
             controller: &mut self.controller,
+            dma: Some(&mut self.dma),
         };
         self.cpu.reset_with_bus(&mut bus);
     }
@@ -69,9 +70,12 @@ impl Console {
             cartridge: &mut *self.cartridge,
             ppu: &mut self.ppu,
             controller: &mut self.controller,
+            dma: Some(&mut self.dma),
         };
         let step = self.cpu.step_with_bus(&mut bus, None);
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
+        drop(bus);
+        self.run_pending_dma();
         step
     }
 
@@ -81,10 +85,36 @@ impl Console {
             cartridge: &mut *self.cartridge,
             ppu: &mut self.ppu,
             controller: &mut self.controller,
+            dma: Some(&mut self.dma),
         };
         let step = self.cpu.step_with_bus(&mut bus, Some(trace));
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
+        drop(bus);
+        self.run_pending_dma();
         step
+    }
+
+    fn run_pending_dma(&mut self) {
+        let mut dma = self.dma;
+        let pending = dma.take_pending();
+        if pending == 0 {
+            self.dma = dma;
+            return;
+        }
+        let mut bus = ConsoleBus {
+            wram: &mut self.wram,
+            cartridge: &mut *self.cartridge,
+            ppu: &mut self.ppu,
+            controller: &mut self.controller,
+            dma: None,
+        };
+        let transfers = dma.execute(pending, &mut bus);
+        drop(bus);
+        self.dma = dma;
+        self.timing.master_ticks = self
+            .timing
+            .master_ticks
+            .saturating_add(u64::from(transfers) * 6);
     }
 
     /// Advances the machine by a number of master-clock ticks.
@@ -168,6 +198,7 @@ struct ConsoleBus<'a> {
     cartridge: &'a mut dyn CartridgeDevice,
     ppu: &'a mut Ppu,
     controller: &'a mut ControllerState,
+    dma: Option<&'a mut Dma>,
 }
 
 impl CpuBus for ConsoleBus<'_> {
@@ -193,6 +224,12 @@ impl CpuBus for ConsoleBus<'_> {
             self.ppu.write_register(register, value);
         } else if raw & 0xffff == 0x4016 {
             self.controller.write_strobe(value);
+        } else if let Some(dma) = self.dma.as_deref_mut() {
+            if (0x4200..=0x437f).contains(&(raw as u16)) {
+                dma.write_register(raw as u16, value);
+            } else {
+                self.cartridge.write(address, value);
+            }
         } else {
             self.cartridge.write(address, value);
         }
@@ -309,6 +346,7 @@ mod tests {
             cartridge: &mut *console.cartridge,
             ppu: &mut console.ppu,
             controller: &mut console.controller,
+            dma: Some(&mut console.dma),
         };
         bus.write(Address24::new(0x000123), 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x7e0123)), 0xa5);
