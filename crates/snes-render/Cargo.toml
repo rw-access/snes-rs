@@ -1,0 +1,14 @@
+[package]
+name = "snes-render"
+version = "0.1.0"
+description = "Headless rendering and ROM-test tools for snes-rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+snes-core = { path = "../snes-core" }
+
+[[bin]]
+name = "snes-test"
+path = "src/bin/snes-test.rs"

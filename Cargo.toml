@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/snes-core",
+    "crates/snes-render",
+    "crates/snes-play",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"

@@ -1,0 +1,59 @@
+{
+  "format_version": 1,
+  "description": "Pinned, opt-in SNES emulator test sources. Generated artifacts are not part of this repository.",
+  "sources": [
+    {
+      "id": "singlesteptests-65816",
+      "name": "SingleStepTests 65816",
+      "repository": "https://github.com/SingleStepTests/65816.git",
+      "revision": "db6b10401729d5f20f2181dde5d3d7b037093a4a",
+      "paths": ["README.md", "v1"],
+      "include_extensions": [".json"],
+      "purpose": "Instruction-level 65816 initial/final state and bus-cycle JSON vectors."
+    },
+    {
+      "id": "peterlemon-snes",
+      "name": "PeterLemon SNES CPU tests",
+      "repository": "https://github.com/PeterLemon/SNES.git",
+      "revision": "350b394e86ec5d62f600b5cbf64cdce3721bb6ef",
+      "paths": ["README.md", "CPUTest/CPU"],
+      "include_extensions": [".sfc", ".png"],
+      "purpose": "Compiled 65816/SNES CPU test ROMs and their expected display captures."
+    },
+    {
+      "id": "higan-snes-test-roms",
+      "name": "higan SNES test ROMs",
+      "repository": "https://gitlab.com/higan/snes-test-roms.git",
+      "revision": "26e8aa91e0d3b90b901e7e693bc4a8244b391d7b",
+      "paths": [
+        "93143-hblank-dma-vram",
+        "KungFuFurby-test-ROMs",
+        "Motive-test-ROMs",
+        "PeterLemon",
+        "Sour",
+        "VitorVilela7",
+        "absindx",
+        "blargg-spc-6",
+        "gilyon",
+        "jonasquinn-test-roms",
+        "ladida-lol",
+        "lidnariq-ppu-bus-activity",
+        "lidnariq-smp-clock-speed-measurement",
+        "tepples-tellinglys",
+        "tukuyomi-bsnes-tests",
+        "undisbeliever-inidisp"
+      ],
+      "include_extensions": [
+        ".sfc",
+        ".smc",
+        ".spc",
+        ".bin",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp"
+      ],
+      "purpose": "Curated SNES hardware-behavior ROMs, audio fixtures, and expected image captures."
+    }
+  ]
+}

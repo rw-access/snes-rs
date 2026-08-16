@@ -1,0 +1,16 @@
+/target/
+Cargo.lock
+
+# Local ROMs and generated test artifacts.
+*.sfc
+*.smc
+*.rom
+/tests/snes-test-roms/*
+!/tests/snes-test-roms/README.md
+!/tests/snes-test-roms/sources.json
+/tests/fixtures/generated/
+
+# Editor and operating-system files.
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,11 @@
+[package]
+name = "snes-play"
+version = "0.1.0"
+description = "Optional desktop frontend entry point for snes-rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "snes-play"
+path = "src/main.rs"
