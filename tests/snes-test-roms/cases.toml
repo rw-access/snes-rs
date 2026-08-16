@@ -68,3 +68,22 @@ height = 224
 channel_tolerance = 0
 mask = ""
 artifact = "peterlemon-ppu-bgmap-2bpp"
+
+[case.gilyon-spc700]
+source = "higan-snes-test-roms"
+revision = "26e8aa91e0d3b90b901e7e693bc4a8244b391d7b"
+rom = "gilyon/spctest.sfc"
+rom_sha256 = "ed6aa8fa247007cdf683f243454d1dff31a25e1977c25fc9d7e1a96e3d031e92"
+mapping = "lorom"
+# gilyon/snes-tests/spctest/spctest.asm documents $2140 as 0=running,
+# 1=all tests passed, and 2=failed. It remains diagnostic until the current
+# SPC700 execution reaches the completion port.
+enabled = false
+diagnostic_only = true
+max_master_ticks = 20000000
+deterministic_replay = true
+result_protocol = "memory-byte"
+result_address = 0x002140
+result_running = 0
+result_passed = 1
+artifact = "gilyon-spc700"

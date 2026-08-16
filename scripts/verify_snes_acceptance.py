@@ -67,7 +67,7 @@ def load_descriptor(path: Path) -> dict:
         elif raw_value in ("true", "false"):
             value = raw_value == "true"
         else:
-            value = int(raw_value)
+            value = int(raw_value, 0)
         (current if current is not None else document)[key] = value
     return document
 

@@ -554,7 +554,7 @@ impl Apu {
             0xd8 => Some(direct(operand(1))),
             0xcb => Some(direct(operand(1))),
             0xfa => Some(direct(operand(2))), // MOV dd,ds
-            0x18 | 0x29 | 0x49 | 0x78 | 0x98 | 0xa9 => Some(direct(operand(2))),
+            0x18 | 0x29 | 0x49 | 0x98 | 0xa9 => Some(direct(operand(2))),
             _ => None,
         }
     }
@@ -1108,7 +1108,13 @@ impl Spc700 {
             }
             // Direct-page immediate and direct-page-to-direct-page ALU forms
             // encode the source operand before the destination operand.
-            0x18 | 0x38 | 0x58 | 0x78 | 0x98 | 0xb8 => {
+            0x78 => {
+                let value = self.fetch(ram);
+                let destination = self.fetch_direct_address(ram);
+                self.compare(ram[usize::from(destination)], value);
+                5
+            }
+            0x18 | 0x38 | 0x58 | 0x98 | 0xb8 => {
                 let value = self.fetch(ram);
                 let destination = self.fetch_direct_address(ram);
                 self.apply_alu_to_memory(ram, destination, value, Self::alu_op(opcode));
@@ -2175,6 +2181,18 @@ mod tests {
         // The eighth instruction is ADC: $0e + $01 + carry = $10.
         assert_eq!(apu.ram[0x40], 0x10);
         assert_eq!(apu.ram[0x20], 0x00);
+    }
+
+    #[test]
+    fn spc700_compare_direct_immediate_does_not_write_the_operand() {
+        let mut apu = Apu::default();
+        apu.ram[0x10] = 0x42;
+        apu.ram[..3].copy_from_slice(&[0x78, 0x42, 0x10]); // CMP $10,#$42
+
+        assert_eq!(apu.step_spc700(), 5);
+        assert_eq!(apu.ram[0x10], 0x42);
+        assert_ne!(apu.spc700.psw & 0x02, 0);
+        assert_ne!(apu.spc700.psw & 0x01, 0);
     }
 
     #[test]

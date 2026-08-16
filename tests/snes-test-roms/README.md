@@ -126,7 +126,7 @@ one file-count or exit-status check:
 | --- | --- |
 | SingleStepTests `v1/*.json` | Initial/final CPU state, memory, and the applicable bus-access sequence. |
 | PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. The newly materialized PPU cases remain diagnostic while tile-edge differences are resolved. |
-| higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`). |
+| higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`) and gilyon's SPC700 port `$2140` result (`0=running`, `1=passed`, `2=failed`). |
 
 The corpus also contains `.spc`, `.bin`, source, and standalone image files.
 Those are fixtures for a future subsystem harness, not bootable SNES ROM cases.

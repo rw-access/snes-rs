@@ -67,6 +67,7 @@ impl Console {
         self.timing = TimingState::default();
         self.framebuffer.fill(0);
         self.apu = Apu::default();
+        self.apu.boot_spc700();
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
@@ -823,6 +824,21 @@ mod tests {
         console.step_instruction();
         console.step_instruction();
         assert_eq!(console.read_memory(Address24::new(0x7e0000)), 0x5a);
+    }
+
+    #[test]
+    fn console_reset_enters_the_spc700_ipl_uploader() {
+        let mut rom = vec![0; 0x8000];
+        rom[0x7ffc] = 0x00;
+        rom[0x7ffd] = 0x80;
+        rom[0x0000] = 0xdb;
+        let image = RomImage::new(rom);
+        let mut console = Console::new(image).unwrap();
+
+        console.reset();
+
+        assert_eq!(console.apu.spc700.pc, 0xffc0);
+        assert_eq!(console.apu.control, 0xb0);
     }
 
     #[test]
