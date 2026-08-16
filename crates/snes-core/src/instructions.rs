@@ -1,7 +1,71 @@
 //! Instruction metadata boundary.
 
-/// Stable identifier used by CPU steps and future trace output.
+/// Stable identifier used by CPU steps and trace output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstructionId {
+    AdcImmediate,
+    Bra,
+    Brk,
+    CLC,
+    DEX,
+    DEY,
+    EORImmediate,
+    INX,
+    INY,
+    JML,
+    JMP,
+    LdaImmediate,
+    LdxImmediate,
+    LdyImmediate,
+    Nop,
+    Rep,
+    SBCImmediate,
+    SEC,
+    Sep,
+    StaAbsolute,
+    StaLong,
+    StzAbsolute,
+    Tax,
+    Tay,
+    Txa,
+    Tya,
+    Xba,
+    Xce,
+    Unknown(u8),
     Placeholder,
+}
+
+impl InstructionId {
+    pub const fn from_opcode(opcode: u8) -> Self {
+        match opcode {
+            0x00 => Self::Brk,
+            0x18 => Self::CLC,
+            0x38 => Self::SEC,
+            0x4c => Self::JMP,
+            0x5c => Self::JML,
+            0x69 => Self::AdcImmediate,
+            0x80 => Self::Bra,
+            0x88 => Self::DEY,
+            0x8a => Self::Txa,
+            0x8d => Self::StaAbsolute,
+            0x8f => Self::StaLong,
+            0x98 => Self::Tya,
+            0x9c => Self::StzAbsolute,
+            0xa0 => Self::LdyImmediate,
+            0xa2 => Self::LdxImmediate,
+            0xa9 => Self::LdaImmediate,
+            0xaa => Self::Tax,
+            0xa8 => Self::Tay,
+            0xc2 => Self::Rep,
+            0xc8 => Self::INY,
+            0xca => Self::DEX,
+            0xe2 => Self::Sep,
+            0xe8 => Self::INX,
+            0xe9 => Self::SBCImmediate,
+            0xeb => Self::Xba,
+            0xea => Self::Nop,
+            0xfb => Self::Xce,
+            opcode => Self::Unknown(opcode),
+        }
+    }
 }

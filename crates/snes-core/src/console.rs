@@ -162,6 +162,6 @@ mod tests {
         let mut trace = VecTrace::default();
         let traced_step = traced.step_instruction_traced(&mut trace);
         assert_eq!(plain_step, traced_step);
-        assert!(trace.as_slice().is_empty());
+        assert_eq!(trace.as_slice().len(), 1);
     }
 }
