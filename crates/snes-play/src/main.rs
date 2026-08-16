@@ -101,6 +101,7 @@ fn print_help() {
     println!(
         "usage: snes-play ROM [--frames N | --ticks N] [--ppm PATH]\n\n\
          Runs a ROM for a bounded interval (one frame by default) and optionally\n\
-         writes the current 256x224 framebuffer as a binary PPM image."
+         writes the current native framebuffer as a binary PPM image; ordinary\n\
+         modes are 256x224, while Modes 5/6 may use native 512x224 dimensions."
     );
 }
