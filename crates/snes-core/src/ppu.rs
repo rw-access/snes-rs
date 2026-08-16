@@ -27,6 +27,7 @@ pub struct Ppu {
     pub oam: [u8; 544],
     vram_read_latch: u16,
     cgram_write_latch: Option<u8>,
+    cgram_read_latch: Option<u8>,
 }
 
 impl Default for Ppu {
@@ -47,6 +48,7 @@ impl Default for Ppu {
             oam: [0; 544],
             vram_read_latch: 0,
             cgram_write_latch: None,
+            cgram_read_latch: None,
         }
     }
 }
@@ -57,11 +59,21 @@ impl Ppu {
             0x2139 => self.vram_read_latch as u8,
             0x213a => {
                 let value = (self.vram_read_latch >> 8) as u8;
-                self.vram_read_latch = self.vram[self.vram_address as usize & 0x7fff];
                 self.increment_vram_address();
                 value
             }
-            0x213b => self.cgram[self.cgram_address as usize] as u8,
+            0x213b => {
+                if self.cgram_read_latch.is_some() {
+                    let value = (self.cgram[self.cgram_address as usize] >> 8) as u8;
+                    self.cgram_address = self.cgram_address.wrapping_add(1);
+                    self.cgram_read_latch = None;
+                    value
+                } else {
+                    let value = self.cgram[self.cgram_address as usize] as u8;
+                    self.cgram_read_latch = Some(value);
+                    value
+                }
+            }
             0x2100 => self.inidisp,
             0x2105 => self.bgmode,
             0x212c => self.tm,
@@ -77,8 +89,14 @@ impl Ppu {
             0x2107 => self.bg1sc = value,
             0x210b => self.bg12nba = value,
             0x2115 => self.vmain = value,
-            0x2116 => self.vram_address = (self.vram_address & 0xff00) | u16::from(value),
-            0x2117 => self.vram_address = (self.vram_address & 0x00ff) | (u16::from(value) << 8),
+            0x2116 => {
+                self.vram_address = (self.vram_address & 0xff00) | u16::from(value);
+                self.refresh_vram_latch();
+            }
+            0x2117 => {
+                self.vram_address = (self.vram_address & 0x00ff) | (u16::from(value) << 8);
+                self.refresh_vram_latch();
+            }
             0x2118 => {
                 let index = self.vram_address as usize & 0x7fff;
                 self.vram[index] = (self.vram[index] & 0xff00) | u16::from(value);
@@ -96,6 +114,7 @@ impl Ppu {
             0x2121 => {
                 self.cgram_address = value;
                 self.cgram_write_latch = None;
+                self.cgram_read_latch = None;
             }
             0x2122 => {
                 if let Some(low) = self.cgram_write_latch.take() {
@@ -163,6 +182,11 @@ impl Ppu {
             _ => 1,
         };
         self.vram_address = self.vram_address.wrapping_add(increment);
+        self.refresh_vram_latch();
+    }
+
+    fn refresh_vram_latch(&mut self) {
+        self.vram_read_latch = self.vram[self.vram_address as usize & 0x7fff];
     }
 
     fn color_to_rgba(&self, color: u16) -> u32 {
@@ -190,7 +214,7 @@ mod tests {
         ppu.write_register(0x2119, 0x12);
         assert_eq!(ppu.vram[3], 0x1234);
         ppu.vram_address = 3;
-        ppu.vram_read_latch = ppu.vram[3];
+        ppu.refresh_vram_latch();
         assert_eq!(ppu.read_register(0x2139), 0x34);
         assert_eq!(ppu.read_register(0x213a), 0x12);
     }
@@ -202,5 +226,8 @@ mod tests {
         ppu.write_register(0x2122, 0x1f);
         ppu.write_register(0x2122, 0x03);
         assert_eq!(ppu.cgram[2], 0x031f);
+        ppu.write_register(0x2121, 2);
+        assert_eq!(ppu.read_register(0x213b), 0x1f);
+        assert_eq!(ppu.read_register(0x213b), 0x03);
     }
 }
