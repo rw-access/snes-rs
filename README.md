@@ -15,7 +15,10 @@ paths), SPC700/APU I/O, and a bounded BRR/DSP mixer.
 - `crates/snes-render` — headless ROM execution, conformance, and visual
   acceptance tools.
 - `crates/snes-play` — dependency-light bounded-run CLI with optional PPM
-  framebuffer output.
+  framebuffer output, plus optional Winit/Softbuffer and SDL2 desktop
+  frontends.
+- `crates/snes-wasm` and `web/` — browser frontend with WebAssembly video and
+  audio, keyboard/touch controls, save states, and rewind.
 - `docs/accuracy.md` — authoritative reference ledger.
 - `tests/` — local fixtures and the documented opt-in ROM corpus location.
 
@@ -71,6 +74,24 @@ Run the integrated CLI frontend and capture a frame:
 ```sh
 cargo run -p snes-play -- path/to/game.sfc --frames 1 --ppm frame.ppm
 ```
+
+Run a native windowed frontend. The Winit frontend uses a software framebuffer
+and CPAL audio; the SDL2 frontend uses SDL's window, texture, and audio APIs:
+
+```sh
+cargo run -p snes-play --features winit-frontend --bin snes-winit -- path/to/game.sfc
+cargo run -p snes-play --features sdl2-frontend --bin snes-sdl2 -- path/to/game.sfc
+```
+
+Build and serve the browser frontend:
+
+```sh
+wasm-pack build crates/snes-wasm --target web --out-dir ../../web/pkg
+python3 web/dev_server.py --port 8000
+```
+
+Then open <http://localhost:8000/> and choose an `.sfc` or `.smc` ROM. See
+`web/README.md` for browser debugging details.
 
 Replay an lsnes SNES movie (`.lsmv`) into an MP4. The movie contains one
 controller sample per frame; the exporter also writes the emulator's stereo
