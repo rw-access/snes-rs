@@ -159,7 +159,8 @@ visual-acceptance pass:
   3 path covering BG1 8bpp, BG2 4bpp, and modeled priority ordering, a bounded
   affine Mode 7 path, subscreen/fixed-color math, color-window cases, bounded
   frame execution, packed 2/4/8bpp tile decoding, Modes 4–6, direct-color
-  paths, DMA/HDMA VRAM word-port patterns, and tolerant frame comparison;
+  paths, baseline OBJ range/time-over limits, DMA/HDMA VRAM word-port and
+  transfer-pattern behavior, and tolerant frame comparison;
 - PPU `$2133` SETINI masking/write-only behavior and high-resolution scroll
   granularity are covered by focused register tests;
 - console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
@@ -174,7 +175,7 @@ visual-acceptance pass:
 Remaining before claiming broad emulator compatibility: cycle-accurate
 scanline timing, complete H/V timer and
 HDMA behavior, full PPU mode/priority/window and Mode 7 edge behavior,
-scanline sprite limits, exact DSP envelope/interpolation/noise/echo behavior,
+exact DSP envelope/interpolation/noise/echo behavior,
 enhancement-chip cartridges,
 automatic CI execution of the JSON-vector gate, and pinned ROM expected-result
 oracles plus broader visual golden coverage.

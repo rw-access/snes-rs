@@ -368,13 +368,18 @@ fn hdma_address(bank: u8, address: u16) -> Address24 {
     Address24::new((u32::from(bank) << 16) | u32::from(address))
 }
 
-/// SNES transfer patterns: mode 0 writes one B-bus register; modes 1..3
-/// write two, two, and four bytes respectively.
+/// SNES transfer patterns. The same decoder is used by general DMA and HDMA;
+/// HDMA additionally uses the pattern length as the number of bytes in each
+/// table entry. Patterns 6 and 7 are undocumented aliases of 2 and 3.
 fn transfer_pattern(channel_control: u8) -> ([u8; 4], usize) {
     match channel_control & 0x07 {
         1 => ([0, 1, 0, 0], 2),
         2 => ([0, 0, 0, 0], 2),
         3 => ([0, 0, 1, 1], 4),
+        4 => ([0, 1, 2, 3], 4),
+        5 => ([0, 1, 0, 1], 4),
+        6 => ([0, 0, 0, 0], 2),
+        7 => ([0, 0, 1, 1], 4),
         _ => ([0, 0, 0, 0], 1),
     }
 }
@@ -483,6 +488,42 @@ mod tests {
     }
 
     #[test]
+    fn dma_patterns_four_through_seven_follow_the_register_table() {
+        // Patterns 4-7 are valid DMAP encodings too; leaving them as the
+        // mode-0 fallback silently drops three of the four B-bus writes.
+        let cases = [
+            (4, 4, [1, 2, 3, 4], [1, 2, 3, 4]),
+            (5, 4, [1, 2, 3, 4], [3, 4, 0, 0]),
+            (6, 2, [1, 2, 0, 0], [2, 0, 0, 0]),
+            (7, 4, [1, 2, 3, 4], [2, 4, 0, 0]),
+        ];
+
+        for (pattern, size, source, expected) in cases {
+            let mut dma = Dma::default();
+            dma.channels[0] = DmaChannel {
+                control: pattern,
+                destination: 0x20,
+                source_address: 0x1000,
+                size,
+                ..DmaChannel::default()
+            };
+            let mut memory = Memory([0; 0x10000]);
+            memory.0[0x1000..0x1004].copy_from_slice(&source);
+
+            assert_eq!(
+                dma.execute(1, &mut memory),
+                u32::from(size),
+                "pattern {pattern}"
+            );
+            assert_eq!(
+                &memory.0[0x2120..0x2124],
+                &expected,
+                "pattern {pattern} B-bus sequence"
+            );
+        }
+    }
+
+    #[test]
     fn dma_word_pattern_writes_both_vram_data_ports() {
         let mut dma = Dma::default();
         dma.channels[0] = DmaChannel {
@@ -548,6 +589,27 @@ mod tests {
         assert_eq!(bus.ppu.vram[8], 0x8080);
         assert_eq!(bus.ppu.vram_address, 9);
         assert_eq!(dma.run_hdma_scanline(&mut bus), 0);
+        assert_eq!(dma.active_hdma_mask(), 0);
+    }
+
+    #[test]
+    fn hdma_pattern_four_writes_four_consecutive_b_bus_registers() {
+        let mut dma = Dma::default();
+        dma.channels[0] = DmaChannel {
+            control: 4,
+            destination: 0x20,
+            source_address: 0x1000,
+            ..DmaChannel::default()
+        };
+        dma.hdma_enable = 1;
+        let mut memory = Memory([0; 0x10000]);
+        // One scanline entry, followed by the table terminator.
+        memory.0[0x1000..0x1006].copy_from_slice(&[0x81, 1, 2, 3, 4, 0]);
+
+        dma.begin_hdma_frame();
+        assert_eq!(dma.run_hdma_scanline(&mut memory), 4);
+        assert_eq!(&memory.0[0x2120..0x2124], &[1, 2, 3, 4]);
+        assert_eq!(dma.run_hdma_scanline(&mut memory), 0);
         assert_eq!(dma.active_hdma_mask(), 0);
     }
 

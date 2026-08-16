@@ -8,9 +8,10 @@ pub const SCREEN_HEIGHT: usize = 224;
 ///
 /// This deliberately models the ordinary background path first.  The state is
 /// complete enough for deterministic register tests and for simple Mode 0
-/// diagnostic ROMs.  Sprite composition is also modeled for the ordinary
-/// non-interlaced path; scanline limits and timing are intentionally outside
-/// this renderer.
+/// diagnostic ROMs.  Sprite composition is modeled for the ordinary
+/// non-interlaced path, including the baseline per-scanline sprite and
+/// sliver limits.  Cycle-level evaluation timing remains outside this
+/// renderer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ppu {
     pub inidisp: u8,
@@ -126,6 +127,14 @@ struct OamSprite {
     h_flip: bool,
     v_flip: bool,
     size_large: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EvaluatedSprite {
+    index: usize,
+    sprite: OamSprite,
+    /// One bit per 8-pixel sliver, in left-to-right screen order.
+    sliver_mask: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -443,17 +452,20 @@ impl Ppu {
             return None;
         }
         let mut selected: Option<(u16, u8, usize)> = None;
-        for index in 0..128 {
-            let sprite = self.decode_sprite(index);
+        let (sprites, sprite_count) = self.obj_scanline_sprites(y);
+        for evaluated in sprites.iter().take(sprite_count).flatten() {
+            let index = evaluated.index;
+            let sprite = evaluated.sprite;
             let (width, height) = self.obj_dimensions(sprite.size_large);
             let local_x = x as i16 - sprite.x;
             if local_x < 0 || local_x >= width as i16 {
                 continue;
             }
 
-            // OAM Y coordinates wrap at 256.  This also makes sprites whose
-            // bottom crosses the visible region deterministic without trying
-            // to model the PPU's per-scanline evaluation limits.
+            if evaluated.sliver_mask & (1 << (local_x as usize / 8)) == 0 {
+                continue;
+            }
+
             let local_y = (y as i16 - i16::from(sprite.y)).rem_euclid(256) as usize;
             if local_y >= height {
                 continue;
@@ -494,6 +506,61 @@ impl Ppu {
             }
         }
         selected
+    }
+
+    /// Select the sprites and slivers that can contribute on one PPU
+    /// scanline.  The first pass is the range-over limit: the first 32
+    /// vertically intersecting sprites in OAM order are retained.  The
+    /// second pass is the time-over limit: those sprites are evaluated in
+    /// reverse OAM order, spending up to 34 8-pixel slivers.  If the limit is
+    /// reached partway through a sprite, its leftmost screen slivers remain.
+    fn obj_scanline_sprites(&self, y: usize) -> ([Option<EvaluatedSprite>; 32], usize) {
+        let mut sprites = [None; 32];
+        let mut sprite_count = 0;
+
+        for index in 0..128 {
+            let sprite = self.decode_sprite(index);
+            let (width, height) = self.obj_dimensions(sprite.size_large);
+            let local_y = (y as i16 - i16::from(sprite.y)).rem_euclid(256) as usize;
+            if local_y >= height || !Self::sprite_intersects_scanline(sprite.x, width) {
+                continue;
+            }
+
+            if sprite_count == 32 {
+                break;
+            }
+            sprites[sprite_count] = Some(EvaluatedSprite {
+                index,
+                sprite,
+                sliver_mask: 0,
+            });
+            sprite_count += 1;
+        }
+
+        let mut remaining_slivers = 34usize;
+        for slot in (0..sprite_count).rev() {
+            let evaluated = sprites[slot].as_mut().expect("sprite slot was populated");
+            let (width, _) = self.obj_dimensions(evaluated.sprite.size_large);
+            let sliver_count = width / 8;
+            let allowed = remaining_slivers.min(sliver_count);
+            evaluated.sliver_mask = if allowed == 0 {
+                0
+            } else if allowed == 8 {
+                u8::MAX
+            } else {
+                (1u8 << allowed) - 1
+            };
+            remaining_slivers -= allowed;
+        }
+
+        (sprites, sprite_count)
+    }
+
+    fn sprite_intersects_scanline(x: i16, width: usize) -> bool {
+        // X=$100 decodes as -256 and is a documented hardware quirk: it
+        // counts toward range-over even though none of its pixels are on the
+        // visible screen.  Other fully off-screen sprites do not contribute.
+        x == -256 || (x < 256 && i32::from(x) + width as i32 > 0)
     }
 
     fn decode_sprite(&self, index: usize) -> OamSprite {
@@ -1242,6 +1309,89 @@ mod tests {
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
         assert_eq!(frame[0], ppu.color_to_rgba(0x7c00));
+    }
+
+    #[test]
+    fn obj_range_over_discards_sprites_after_thirty_two_on_a_scanline() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x10; // OBJ only.
+        ppu.cgram[128 + 1] = 0x001f;
+        ppu.cgram[128 + 16 + 1] = 0x03e0;
+        ppu.vram[0] = 0x0080; // Color 1 at the first pixel of tile 0.
+        ppu.vram[1] = 0x0080; // The visible frame starts at sprite row 1.
+
+        // All 33 sprites cover the same pixel.  The 33rd sprite has a higher
+        // OBJ priority and a different palette, so an unbounded compositor
+        // would expose it.  Range-over must discard it after the first 32
+        // vertically intersecting sprites in OAM order.
+        for index in 0..128 {
+            let base = index * 4;
+            ppu.oam[base..base + 4].copy_from_slice(&[0, 224, 0, 0]);
+        }
+        for index in 0..33 {
+            let base = index * 4;
+            ppu.oam[base..base + 4].copy_from_slice(&[0, 0, 0, 0]);
+        }
+        ppu.oam[32 * 4..32 * 4 + 4].copy_from_slice(&[0, 0, 0, 0x32]);
+
+        let (_, sprite_count) = ppu.obj_scanline_sprites(1);
+        assert_eq!(sprite_count, 32);
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+    }
+
+    #[test]
+    fn obj_time_over_discards_low_oam_slivers_after_thirty_four() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x10; // OBJ only.
+        ppu.obsel = 0x60; // Ordinary sprites are 16x16.
+        ppu.cgram[128 + 1] = 0x001f;
+        ppu.cgram[128 + 16 + 1] = 0x03e0;
+        ppu.vram[0] = 0x0080; // Color 1 at the first pixel of tile 0.
+        ppu.vram[1] = 0x0080; // The visible frame starts at sprite row 1.
+
+        // Eighteen 16x16 sprites require 36 slivers.  The sliver pass runs
+        // from high to low OAM index, so sprite 0 loses both slivers while
+        // sprites 1..17 remain.  Make sprite 0 high priority to distinguish
+        // that bounded result from an unbounded compositor.
+        for index in 0..128 {
+            let base = index * 4;
+            ppu.oam[base..base + 4].copy_from_slice(&[0, 224, 0, 0]);
+        }
+        for index in 0..18 {
+            let base = index * 4;
+            ppu.oam[base..base + 4].copy_from_slice(&[0, 0, 0, 0]);
+        }
+        ppu.oam[0..4].copy_from_slice(&[0, 0, 0, 0x32]);
+
+        let (sprites, sprite_count) = ppu.obj_scanline_sprites(1);
+        assert_eq!(sprite_count, 18);
+        assert_eq!(
+            sprites[0]
+                .expect("sprite 0 is vertically visible")
+                .sliver_mask,
+            0
+        );
+        assert_eq!(
+            sprites[1]
+                .expect("sprite 1 is vertically visible")
+                .sliver_mask,
+            0b11
+        );
+        assert_eq!(
+            sprites[17]
+                .expect("sprite 17 is vertically visible")
+                .sliver_mask,
+            0b11
+        );
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
     }
 
     #[test]
