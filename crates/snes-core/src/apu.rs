@@ -1,5 +1,8 @@
 //! S-CPU/S-SMP communication state and APU memory boundary.
 
+/// Native S-DSP output rate used by the frontend audio adapters.
+pub const AUDIO_SAMPLE_RATE: u32 = 32_000;
+
 /// Minimal APU state with independent CPU-to-SPC700 and SPC700-to-CPU port
 /// latches. The SPC700 execution and DSP mixer consume this state in later
 /// audio increments.

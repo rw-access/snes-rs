@@ -16,12 +16,13 @@ pub mod ppu;
 pub mod rewind;
 pub mod video;
 
-pub use apu::{Apu, AudioSample};
+pub use apu::{Apu, AudioSample, AUDIO_SAMPLE_RATE};
 pub use bus::{AccessSpeed, Address24, BusAccess, BusAccessKind, TraceSink, VecTrace};
 pub use cartridge::{CartridgeDevice, LoadError, MappingMode, RomImage, RomMetadata};
 pub use console::{
     Console, ConsoleState, RestoreError, TimingState, MASTER_TICKS_PER_FRAME, SNAPSHOT_VERSION,
 };
+pub use controller::ControllerPort;
 pub use cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep, InterruptKind};
 pub use rewind::RewindBuffer;
 pub use video::FrameOutput;
