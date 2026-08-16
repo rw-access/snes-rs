@@ -107,14 +107,16 @@ than corpus compatibility and must not be promoted to a ROM-suite pass:
   ordered bus traces;
 - LoROM/HiROM loading, copier-header stripping, SRAM windows, WRAM mirrors,
   controller serial input, general DMA, and full-state rewind checkpoints;
-- PPU register latches, VRAM/CGRAM/OAM storage, a deterministic Mode 0 BG1
-  renderer, bounded frame execution, and tolerant frame comparison;
+- PPU register latches, VRAM/CGRAM/OAM storage, deterministic Mode 0
+  background/OBJ composition, a bounded affine Mode 7 path, fixed-color math,
+  bounded frame execution, and tolerant frame comparison;
 - APU port/DSP-register state and an initial SPC700 execution subset.
 
 Remaining before claiming broad emulator compatibility: complete 65816 and
-SPC700 opcode coverage, scanline-level timing and HDMA, sprites/windows/color
-math/Mode 7, DSP voice mixing, enhancement-chip cartridges, JSON-vector
-execution, and pinned ROM expected-result plus visual golden runs. The
+SPC700 opcode coverage, scanline-level timing and HDMA, PPU windows and full
+Mode 7 edge behavior, scanline sprite limits, DSP voice mixing,
+enhancement-chip cartridges, JSON-vector execution, and pinned ROM
+expected-result plus visual golden runs. The
 acceptance harness now has per-ROM descriptors, ROM/reference provenance,
 bounded execution, frame capture, deterministic replay, and diff artifacts;
 those mechanisms do not constitute a corpus pass until strict cases with valid

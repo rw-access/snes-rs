@@ -28,6 +28,13 @@ pub struct Ppu {
     pub tm: u8,
     pub ts: u8,
     pub obsel: u8,
+    pub m7sel: u8,
+    pub m7a: i16,
+    pub m7b: i16,
+    pub m7c: i16,
+    pub m7d: i16,
+    pub m7x: i16,
+    pub m7y: i16,
     pub cgwsel: u8,
     pub cgadsub: u8,
     pub fixed_color: u16,
@@ -40,6 +47,7 @@ pub struct Ppu {
     cgram_write_latch: Option<u8>,
     cgram_read_latch: Option<u8>,
     bg_offset_latches: [Option<u8>; 8],
+    mode7_latches: [Option<u8>; 6],
 }
 
 impl Default for Ppu {
@@ -60,6 +68,13 @@ impl Default for Ppu {
             tm: 0,
             ts: 0,
             obsel: 0,
+            m7sel: 0,
+            m7a: 0x0100,
+            m7b: 0,
+            m7c: 0,
+            m7d: 0x0100,
+            m7x: 0,
+            m7y: 0,
             cgwsel: 0,
             cgadsub: 0,
             fixed_color: 0,
@@ -72,6 +87,7 @@ impl Default for Ppu {
             cgram_write_latch: None,
             cgram_read_latch: None,
             bg_offset_latches: [None; 8],
+            mode7_latches: [None; 6],
         }
     }
 }
@@ -130,6 +146,7 @@ impl Ppu {
             0x210b => self.bg12nba = value,
             0x210c => self.bg34nba = value,
             0x210d..=0x2114 => self.write_bg_offset(address, value),
+            0x211a..=0x2120 => self.write_mode7_register(address, value),
             0x2115 => self.vmain = value,
             0x2116 => {
                 self.vram_address = (self.vram_address & 0xff00) | u16::from(value);
@@ -206,6 +223,9 @@ impl Ppu {
             backdrop
         });
         if self.inidisp & 0x80 != 0 || self.bgmode & 0x07 != 0 {
+            if self.inidisp & 0x80 == 0 && self.bgmode & 0x07 == 7 {
+                self.render_mode7(pixels);
+            }
             return;
         }
 
@@ -457,6 +477,48 @@ impl Ppu {
             | (channel((color >> 10) & 0x1f, (fixed >> 10) & 0x1f) << 10)
     }
 
+    fn render_mode7(&self, pixels: &mut [u32]) {
+        if self.tm & 0x01 == 0 {
+            return;
+        }
+        let a = i32::from(self.m7a);
+        let b = i32::from(self.m7b);
+        let c = i32::from(self.m7c);
+        let d = i32::from(self.m7d);
+        let origin_x = i32::from(self.m7x);
+        let origin_y = i32::from(self.m7y);
+        for y in 0..SCREEN_HEIGHT {
+            for x in 0..SCREEN_WIDTH {
+                let screen_x = i32::try_from(x).unwrap_or(0) - 128;
+                let screen_y = i32::try_from(y).unwrap_or(0) - 112;
+                let mut source_x = origin_x + ((a * screen_x + b * screen_y) >> 8);
+                let mut source_y = origin_y + ((c * screen_x + d * screen_y) >> 8);
+                if self.m7sel & 0x01 != 0 {
+                    source_x = -source_x;
+                }
+                if self.m7sel & 0x02 != 0 {
+                    source_y = -source_y;
+                }
+                if !(0..1024).contains(&source_x) || !(0..1024).contains(&source_y) {
+                    continue;
+                }
+                let tile_x = usize::try_from(source_x).unwrap_or(0) / 8;
+                let tile_y = usize::try_from(source_y).unwrap_or(0) / 8;
+                let map_index = (tile_y * 128 + tile_x) & 0x7fff;
+                let tile = usize::from((self.vram[map_index] & 0x00ff) as u8);
+                let tile_data = (0x4000 + tile * 64) & 0x7fff;
+                let pixel_index = tile_data
+                    + (usize::try_from(source_y).unwrap_or(0) & 7) * 8
+                    + (usize::try_from(source_x).unwrap_or(0) & 7);
+                let color = (self.vram[pixel_index & 0x7fff] & 0x00ff) as u8;
+                if color != 0 {
+                    let color = self.apply_color_math(self.cgram[usize::from(color)], 0x01);
+                    pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
+                }
+            }
+        }
+    }
+
     fn write_bg_offset(&mut self, address: u16, value: u8) {
         let register = usize::from(address - 0x210d);
         let index = register / 2;
@@ -470,6 +532,32 @@ impl Ppu {
             }
         } else {
             self.bg_offset_latches[index] = Some(value);
+        }
+    }
+
+    fn write_mode7_register(&mut self, address: u16, value: u8) {
+        let index = match address {
+            0x211a => return self.m7sel = value,
+            0x211b => 0,
+            0x211c => 1,
+            0x211d => 2,
+            0x211e => 3,
+            0x211f => 4,
+            0x2120 => 5,
+            _ => return,
+        };
+        if let Some(low) = self.mode7_latches[index].take() {
+            let combined = i16::from_le_bytes([low, value]);
+            match index {
+                0 => self.m7a = combined,
+                1 => self.m7b = combined,
+                2 => self.m7c = combined,
+                3 => self.m7d = combined,
+                4 => self.m7x = combined,
+                _ => self.m7y = combined,
+            }
+        } else {
+            self.mode7_latches[index] = Some(value);
         }
     }
 
@@ -633,6 +721,31 @@ mod tests {
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
         assert_eq!(frame[0], ppu.color_to_rgba(0x7c00));
+    }
+
+    #[test]
+    fn mode7_renders_an_affine_tilemap_sample() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 7;
+        ppu.tm = 1;
+        ppu.m7a = 0x0100;
+        ppu.m7d = 0x0100;
+        ppu.m7x = 128;
+        ppu.m7y = 112;
+        ppu.cgram[1] = 0x001f;
+        for map in 0..0x4000 {
+            ppu.vram[map] = 1;
+        }
+        for pixel in 0..64 {
+            ppu.vram[0x4000 + 64 + pixel] = 1;
+        }
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[112 * SCREEN_WIDTH + 128], ppu.color_to_rgba(0x001f));
     }
 
     #[test]
