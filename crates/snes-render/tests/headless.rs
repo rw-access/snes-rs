@@ -21,3 +21,18 @@ fn headless_runner_executes_until_a_bounded_stop() {
     assert!(result.stopped);
     assert!(result.master_ticks > 0);
 }
+
+#[test]
+fn headless_runner_honors_frame_bounds() {
+    let mut rom = vec![0xea; 0x8000];
+    rom[0x7ffc] = 0;
+    rom[0x7ffd] = 0x80;
+    let runner = HeadlessRunner::new(RomTestDescriptor {
+        max_frames: Some(1),
+        ..RomTestDescriptor::default()
+    });
+    let mut console = runner.load_bytes(rom).unwrap();
+    let result = runner.run(&mut console);
+    assert!(result.master_ticks > 0);
+    assert!(!result.stopped);
+}

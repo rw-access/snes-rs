@@ -17,7 +17,9 @@ pub mod video;
 
 pub use bus::{AccessSpeed, Address24, BusAccess, BusAccessKind, TraceSink, VecTrace};
 pub use cartridge::{CartridgeDevice, LoadError, MappingMode, RomImage, RomMetadata};
-pub use console::{Console, ConsoleState, RestoreError, TimingState, SNAPSHOT_VERSION};
+pub use console::{
+    Console, ConsoleState, RestoreError, TimingState, MASTER_TICKS_PER_FRAME, SNAPSHOT_VERSION,
+};
 pub use cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep};
 pub use rewind::RewindBuffer;
 pub use video::FrameOutput;

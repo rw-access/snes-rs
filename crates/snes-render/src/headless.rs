@@ -46,8 +46,12 @@ impl HeadlessRunner {
 
     pub fn run(&self, console: &mut Console) -> RomRunResult {
         console.reset();
-        let limit = self.descriptor.max_master_ticks.unwrap_or(0);
-        console.run_for_master_ticks(limit);
+        if let Some(frames) = self.descriptor.max_frames {
+            console.run_for_frames(frames);
+        } else {
+            let limit = self.descriptor.max_master_ticks.unwrap_or(0);
+            console.run_for_master_ticks(limit);
+        }
         RomRunResult {
             master_ticks: console.master_ticks(),
             stopped: console.is_stopped(),

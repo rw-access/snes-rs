@@ -10,6 +10,11 @@ use crate::{
     video::FrameOutput,
 };
 
+/// Approximate NTSC frame duration in the master-clock domain used by the
+/// bounded headless runner. The renderer remains deterministic even before
+/// scanline-level timing is introduced.
+pub const MASTER_TICKS_PER_FRAME: u64 = 357_366;
+
 /// The complete SNES machine state owned by the core.
 pub struct Console {
     cpu: Cpu65816,
@@ -130,6 +135,10 @@ impl Console {
                 break;
             }
         }
+    }
+
+    pub fn run_for_frames(&mut self, frames: u64) {
+        self.run_for_master_ticks(frames.saturating_mul(MASTER_TICKS_PER_FRAME));
     }
 
     /// Produces the next video frame.
