@@ -131,10 +131,18 @@ struct ScreenPixel {
 impl Ppu {
     pub fn read_register(&mut self, address: u16) -> u8 {
         match address {
-            0x2139 => self.vram_read_latch as u8,
+            0x2139 => {
+                let value = self.vram_read_latch as u8;
+                if self.vmain & 0x80 == 0 {
+                    self.increment_vram_address();
+                }
+                value
+            }
             0x213a => {
                 let value = (self.vram_read_latch >> 8) as u8;
-                self.increment_vram_address();
+                if self.vmain & 0x80 != 0 {
+                    self.increment_vram_address();
+                }
                 value
             }
             0x213b => {
@@ -411,12 +419,7 @@ impl Ppu {
             let table_base = usize::from(self.obsel & 0x07) << 13;
             let table_base = table_base + if sprite.name_select { name_select } else { 0 };
             let tile_base = (table_base + usize::from(tile) * 16) & 0x7fff;
-            let row_base = (tile_base + row * 2) & 0x7fff;
-            let bit = 7 - column;
-            let color = ((self.vram[row_base] >> bit) & 1)
-                | (((self.vram[(row_base + 1) & 0x7fff] >> bit) & 1) << 1)
-                | (((self.vram[(tile_base + 8 + row * 2) & 0x7fff] >> bit) & 1) << 2)
-                | (((self.vram[(tile_base + 8 + row * 2 + 1) & 0x7fff] >> bit) & 1) << 3);
+            let color = self.tile_pixel(tile_base, row, column, 4);
             if color == 0 {
                 continue;
             }
@@ -541,28 +544,19 @@ impl Ppu {
         if entry & 0x4000 != 0 {
             column = 7 - column;
         }
-        let tile_base = self.bg_tile_base(layer);
         let eight_bpp = mode == 3 && layer == 0;
-        let tile_stride = if eight_bpp { 32 } else { 16 };
-        let tile_base = tile_base + usize::from(entry & 0x03ff) * tile_stride;
-        let row_base = (tile_base + row * 2) & 0x7fff;
-        let bit = 7 - column;
-        let mut color = ((self.vram[row_base] >> bit) & 1)
-            | (((self.vram[(row_base + 1) & 0x7fff] >> bit) & 1) << 1);
         let four_bpp = eight_bpp || (matches!(mode, 1 | 2 | 3) && layer < 2);
-        if four_bpp {
-            let tile_row_base = tile_base + 8 + row * 2;
-            color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 2)
-                | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 3);
-        }
-        if eight_bpp {
-            let tile_row_base = tile_base + 16 + row * 2;
-            color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 4)
-                | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 5);
-            let tile_row_base = tile_base + 24 + row * 2;
-            color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 6)
-                | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 7);
-        }
+        let bpp: u8 = if eight_bpp {
+            8
+        } else if four_bpp {
+            4
+        } else {
+            2
+        };
+        let tile_base = self.bg_tile_base(layer);
+        let tile_stride = usize::from(bpp) * 4;
+        let tile_base = tile_base + usize::from(entry & 0x03ff) * tile_stride;
+        let color = self.tile_pixel(tile_base, row, column, bpp);
         if color == 0 {
             (0, false)
         } else {
@@ -658,6 +652,24 @@ impl Ppu {
             _ => self.bg34nba >> 4,
         };
         usize::from(nibble) << 12
+    }
+
+    /// Decodes one pixel from the packed VRAM word layout used by the PPU.
+    ///
+    /// A tile row occupies one VRAM word per pair of bitplanes: the low byte
+    /// is the even-numbered plane and the high byte is the odd-numbered plane.
+    /// Consequently, an 8x8 tile occupies 8, 16, or 32 words at 2, 4, or
+    /// 8bpp respectively, with each additional plane pair beginning eight
+    /// words after the first pair.
+    fn tile_pixel(&self, tile_base: usize, row: usize, column: usize, bpp: u8) -> u8 {
+        let bit = 7 - column;
+        let mut color = 0;
+        for plane_pair in 0..usize::from(bpp / 2) {
+            let word = self.vram[(tile_base + plane_pair * 8 + row) & 0x7fff];
+            color |= (((word >> bit) & 1) as u8) << (plane_pair * 2);
+            color |= (((word >> (bit + 8)) & 1) as u8) << (plane_pair * 2 + 1);
+        }
+        color
     }
 
     fn apply_color_math_at(&self, color: u16, source: u8, x: usize) -> u16 {
@@ -886,6 +898,54 @@ mod tests {
     }
 
     #[test]
+    fn vram_low_byte_reads_increment_when_vmain_selects_low_access() {
+        let mut ppu = Ppu::default();
+        ppu.vram[4] = 0x1234;
+        ppu.vram[5] = 0x5678;
+        ppu.write_register(0x2115, 0x00);
+        ppu.write_register(0x2116, 4);
+        ppu.write_register(0x2117, 0);
+
+        assert_eq!(ppu.read_register(0x2139), 0x34);
+        assert_eq!(ppu.vram_address, 5);
+        assert_eq!(ppu.read_register(0x2139), 0x78);
+        assert_eq!(ppu.vram_address, 6);
+    }
+
+    #[test]
+    fn cpu_style_vram_writes_render_a_two_bpp_tile_at_eight_word_stride() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x01;
+        ppu.bg1sc = 0x04;
+        ppu.cgram[3] = 0x001f;
+
+        // Write tile 1 through VMDATA as the CPU would. Each word packs the
+        // two 2bpp planes for one row; the first pixel is color 3.
+        ppu.write_register(0x2115, 0x80);
+        ppu.write_register(0x2116, 8);
+        ppu.write_register(0x2117, 0);
+        for row in 0..8 {
+            let word = if row == 0 { 0x8080 } else { 0 };
+            ppu.write_register(0x2118, word as u8);
+            ppu.write_register(0x2119, (word >> 8) as u8);
+        }
+
+        // Place tile 1 in the BG1 map, also through the VRAM data ports.
+        ppu.write_register(0x2116, 0);
+        ppu.write_register(0x2117, 0x04);
+        ppu.write_register(0x2118, 1);
+        ppu.write_register(0x2119, 0);
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[1], ppu.color_to_rgba(0));
+        assert_eq!(ppu.vram[8], 0x8080);
+        assert_eq!(ppu.vram[16], 0);
+    }
+
+    #[test]
     fn cgram_registers_round_trip_colors() {
         let mut ppu = Ppu::default();
         ppu.write_register(0x2121, 2);
@@ -907,16 +967,18 @@ mod tests {
         ppu.cgram[65] = 0x7c00;
         ppu.cgram[97] = 0x7fff;
 
-        // One opaque pixel in tile 1 for each layer.  The four map bases are
-        // distinct 32x32 map regions in VRAM.
+        // One opaque pixel in tile 1 for each layer.  The four map and tile
+        // bases are distinct VRAM regions.
+        ppu.bg12nba = 0x10;
+        ppu.bg34nba = 0x32;
         for layer in 0..4 {
-            let tile_base = layer * 16;
-            ppu.vram[tile_base + 16] = 0x0080;
+            let tile_base = layer * 0x1000;
+            ppu.vram[tile_base + 8] = 0x0080;
             ppu.vram[layer * 0x400] = 1;
         }
 
         assert_eq!(ppu.vram[0], 1);
-        assert_eq!(ppu.vram[16], 0x0080);
+        assert_eq!(ppu.vram[8], 0x0080);
         assert_eq!(ppu.bg_pixel_for_mode(0, 0, 0, false, 0), (1, false));
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
@@ -960,8 +1022,7 @@ mod tests {
 
         // An 8x8 OBJ tile with color 1 at the left edge and color 2 at the
         // right edge, using the two low bitplanes in the first row.
-        ppu.vram[0] = 0x0080;
-        ppu.vram[1] = 0x0001;
+        ppu.vram[0] = 0x0180;
         ppu.oam[0..4].copy_from_slice(&[10, 20, 0, 0]);
         ppu.oam[512] = 0;
 
@@ -987,14 +1048,11 @@ mod tests {
         ppu.cgram[128 + 1] = 0x001f;
 
         // BG1 high-priority color 1 at the origin.
-        ppu.vram[16] = 0x0080;
+        ppu.vram[8] = 0x0080;
         ppu.vram[0x400] = 1 | (1 << 13);
         // OBJ color 1 at the same screen pixel, with the lowest OBJ priority
         // so that the high BG1 plane remains in front of it.
         ppu.vram[0] = 0x0080;
-        ppu.vram[1] = 0;
-        ppu.vram[8] = 0;
-        ppu.vram[9] = 0;
         ppu.oam[0..4].copy_from_slice(&[0, 0, 0, 0x00]);
         ppu.oam[512] = 0;
 
@@ -1036,12 +1094,11 @@ mod tests {
         ppu.tm = 0x01;
         ppu.cgram[13] = 0x001f;
 
-        // Map entry 1 selects a 4bpp tile.  All four bitplanes are set for
+        // Map entry 1 selects a 4bpp tile. Planes 0, 2, and 3 are set for
         // the first two pixels, producing color 13 (1 + 4 + 8).
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x00c0;
-        ppu.vram[24] = 0x00c0;
-        ppu.vram[25] = 0x00c0;
+        ppu.vram[24] = 0xc0c0;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1066,8 +1123,8 @@ mod tests {
         // Pixel 0 is 0xa5 = planes 0, 2, 5, and 7.
         ppu.vram[tile_base] = 0x0080;
         ppu.vram[tile_base + 8] = 0x0080;
-        ppu.vram[tile_base + 17] = 0x0080;
-        ppu.vram[tile_base + 25] = 0x0080;
+        ppu.vram[tile_base + 16] = 0x8000;
+        ppu.vram[tile_base + 24] = 0x8000;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1131,7 +1188,7 @@ mod tests {
         ppu.bg34nba = 0x01;
         ppu.cgram[5] = 0x7c00;
         ppu.vram[0x0800] = 1 | (1 << 10);
-        ppu.vram[0x1010] = 0x0080;
+        ppu.vram[0x1008] = 0x0080;
         ppu.tm = 0x04;
         frame.fill(0);
         ppu.render_frame(&mut frame);
@@ -1152,7 +1209,7 @@ mod tests {
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x0080;
         ppu.vram[0x0400] = 1 | (1 << 10) | (1 << 13);
-        ppu.vram[0x1010] = 0x0080;
+        ppu.vram[0x1008] = 0x0080;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1207,7 +1264,7 @@ mod tests {
         // The sampled row of tile 1 is color 1 and the sampled row of tile 2
         // is color 2.
         ppu.vram[0x1010] = 0x00ff;
-        ppu.vram[0x1021] = 0x00ff;
+        ppu.vram[0x1020] = 0xff00;
         ppu.vram[0x0400] = 1;
         ppu.vram[0x0401] = 1;
         ppu.vram[0x0402] = 2;
@@ -1303,7 +1360,7 @@ mod tests {
         ppu.tm = 0x01;
         ppu.cgram[1] = color;
         ppu.vram[0] = 1;
-        ppu.vram[16] = 0x00ff;
+        ppu.vram[8] = 0x00ff;
         ppu
     }
 

@@ -382,6 +382,7 @@ fn transfer_pattern(channel_control: u8) -> ([u8; 4], usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ppu::Ppu;
 
     struct Memory([u8; 0x10000]);
 
@@ -392,6 +393,38 @@ mod tests {
 
         fn write(&mut self, address: Address24, value: u8) {
             self.0[address.get() as usize & 0xffff] = value;
+        }
+    }
+
+    struct PpuMemory {
+        bytes: [u8; 0x10000],
+        ppu: Ppu,
+    }
+
+    impl Default for PpuMemory {
+        fn default() -> Self {
+            Self {
+                bytes: [0; 0x10000],
+                ppu: Ppu::default(),
+            }
+        }
+    }
+
+    impl CpuBus for PpuMemory {
+        fn read(&mut self, address: Address24) -> u8 {
+            let address = address.get() as u16;
+            match address {
+                0x2139..=0x213a => self.ppu.read_register(address),
+                _ => self.bytes[usize::from(address)],
+            }
+        }
+
+        fn write(&mut self, address: Address24, value: u8) {
+            let address = address.get() as u16;
+            match address {
+                0x2100..=0x213f => self.ppu.write_register(address, value),
+                _ => self.bytes[usize::from(address)] = value,
+            }
         }
     }
 
@@ -450,6 +483,27 @@ mod tests {
     }
 
     #[test]
+    fn dma_word_pattern_writes_both_vram_data_ports() {
+        let mut dma = Dma::default();
+        dma.channels[0] = DmaChannel {
+            control: 1,
+            destination: 0x18,
+            source_address: 0x1000,
+            size: 2,
+            ..DmaChannel::default()
+        };
+        let mut bus = PpuMemory::default();
+        bus.ppu.write_register(0x2115, 0x80);
+        bus.ppu.write_register(0x2116, 8);
+        bus.ppu.write_register(0x2117, 0);
+        bus.bytes[0x1000..0x1002].copy_from_slice(&[0x80, 0x80]);
+
+        assert_eq!(dma.execute(1, &mut bus), 2);
+        assert_eq!(bus.ppu.vram[8], 0x8080);
+        assert_eq!(bus.ppu.vram_address, 9);
+    }
+
+    #[test]
     fn hdma_direct_repeat_entry_writes_each_scanline_then_terminates() {
         let mut dma = Dma::default();
         dma.channels[0] = DmaChannel {
@@ -471,6 +525,29 @@ mod tests {
         assert_eq!(memory.0[0x2120], 0x33);
         assert_eq!(memory.0[0x2121], 0x44);
         assert_eq!(dma.run_hdma_scanline(&mut memory), 0);
+        assert_eq!(dma.active_hdma_mask(), 0);
+    }
+
+    #[test]
+    fn hdma_word_pattern_writes_vram_data_ports_and_consumes_descriptor() {
+        let mut dma = Dma::default();
+        dma.channels[0] = DmaChannel {
+            control: 1,
+            destination: 0x18,
+            source_address: 0x1000,
+            ..DmaChannel::default()
+        };
+        dma.hdma_enable = 1;
+        let mut bus = PpuMemory::default();
+        bus.ppu.write_register(0x2115, 0x80);
+        bus.ppu.write_register(0x2116, 8);
+        bus.ppu.write_register(0x2117, 0);
+        bus.bytes[0x1000..0x1004].copy_from_slice(&[1, 0x80, 0x80, 0]);
+
+        assert_eq!(dma.run_hdma_scanline(&mut bus), 2);
+        assert_eq!(bus.ppu.vram[8], 0x8080);
+        assert_eq!(bus.ppu.vram_address, 9);
+        assert_eq!(dma.run_hdma_scanline(&mut bus), 0);
         assert_eq!(dma.active_hdma_mask(), 0);
     }
 

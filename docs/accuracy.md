@@ -149,12 +149,15 @@ visual-acceptance pass:
   tile and priority paths (including Mode 2 per-column offsets), a bounded Mode
   3 path covering BG1 8bpp, BG2 4bpp, and modeled priority ordering, a bounded
   affine Mode 7 path, subscreen/fixed-color math, color-window cases, bounded
-  frame execution, and tolerant frame comparison;
+  frame execution, packed 2/4/8bpp tile decoding, DMA/HDMA VRAM word-port
+  patterns, and tolerant frame comparison;
 - console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
   selected H/V timer register and IRQ paths;
 - APU port/DSP-register state and an initial SPC700 execution subset, including
-  selected word arithmetic with full-word zero/negative flags for word
-  load/increment/decrement operations and DIV overflow/zero-divisor edge cases.
+  the `$F0-$FF` I/O overlay, DSP address/data access, timer dividers and
+  read-clear outputs, IPL entry state, and selected word arithmetic with
+  full-word zero/negative flags for word load/increment/decrement operations
+  and DIV overflow/zero-divisor edge cases.
 
 Remaining before claiming broad emulator compatibility: complete 65816 and
 SPC700 opcode coverage, cycle-accurate scanline timing, complete H/V timer and

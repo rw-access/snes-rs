@@ -10,6 +10,10 @@ pub struct Apu {
     pub dsp_address: u8,
     pub dsp: [u8; 128],
     pub spc700: Spc700,
+    timer_targets: [u8; 3],
+    timer_stage2: [u8; 3],
+    timer_outputs: [u8; 3],
+    timer_stage1_cycles: [u16; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -45,9 +49,20 @@ impl Default for Apu {
                 sp: 0xef,
                 ..Spc700::default()
             },
+            timer_targets: [0; 3],
+            timer_stage2: [0; 3],
+            timer_outputs: [0; 3],
+            timer_stage1_cycles: [0; 3],
         }
     }
 }
+
+const SPC_IPL_ROM: [u8; 64] = [
+    0xcd, 0xef, 0xbd, 0xe8, 0x00, 0xc6, 0x1d, 0xd0, 0xfc, 0x8f, 0xaa, 0xf4, 0x8f, 0xbb, 0xf5, 0x78,
+    0xcc, 0xf4, 0xd0, 0xfb, 0x2f, 0x19, 0xeb, 0xf4, 0xd0, 0xfc, 0x7e, 0xf4, 0xd0, 0x0b, 0xe4, 0xf5,
+    0xcb, 0xf4, 0xd7, 0x00, 0xfc, 0xd0, 0xf3, 0xab, 0x01, 0x10, 0xef, 0x7e, 0xf4, 0x10, 0xeb, 0xba,
+    0xf6, 0xda, 0x00, 0xba, 0xf4, 0xc4, 0xf4, 0xdd, 0x5d, 0xd0, 0xdb, 0x1f, 0x00, 0x00, 0xc0, 0xff,
+];
 
 impl Apu {
     pub fn read_cpu_port(&self, port: usize) -> u8 {
@@ -67,15 +82,7 @@ impl Apu {
     }
 
     pub fn write_control(&mut self, value: u8) {
-        self.control = value;
-        if value & 0x10 != 0 {
-            self.ports[0] = 0;
-            self.ports[1] = 0;
-        }
-        if value & 0x20 != 0 {
-            self.ports[2] = 0;
-            self.ports[3] = 0;
-        }
+        self.write_spc_control(value);
     }
 
     pub fn write_dsp_address(&mut self, value: u8) {
@@ -90,15 +97,186 @@ impl Apu {
         self.dsp[self.dsp_address as usize] = value;
     }
 
+    /// Reads one of the SPC700's memory-mapped I/O registers.
+    ///
+    /// The timer output registers are read-and-clear, matching the hardware
+    /// overlay rather than the backing RAM.  The write-only registers return
+    /// zero; `$F8` and `$F9` remain ordinary RAM.
+    pub fn read_spc_io(&mut self, address: u8) -> u8 {
+        let value = match address {
+            0xf0 | 0xf1 | 0xfa | 0xfb | 0xfc => 0,
+            0xf2 => self.dsp_address,
+            0xf3 => self.read_dsp_data(),
+            0xf4..=0xf7 => self.ports[usize::from(address - 0xf4)],
+            0xfd..=0xff => {
+                let timer = usize::from(address - 0xfd);
+                let value = self.timer_outputs[timer] & 0x0f;
+                self.timer_outputs[timer] = 0;
+                value
+            }
+            _ => self.ram[usize::from(address)],
+        };
+        self.ram[usize::from(address)] = value;
+        value
+    }
+
+    /// Writes one of the SPC700's memory-mapped I/O registers.
+    pub fn write_spc_io(&mut self, address: u8, value: u8) {
+        match address {
+            0xf1 => self.write_spc_control(value),
+            0xf2 => self.write_dsp_address(value),
+            0xf3 => self.write_dsp_data(value),
+            0xf4..=0xf7 => {
+                // These are SPC700 output ports.  The current public port
+                // boundary intentionally keeps the pre-existing shared-port
+                // behavior used by the console tests.
+                self.ports[usize::from(address - 0xf4)] = value;
+            }
+            0xfa..=0xfc => {
+                self.timer_targets[usize::from(address - 0xfa)] = value;
+            }
+            0xfd..=0xff => {}
+            _ => {}
+        }
+        // I/O writes also reach the underlying RAM, as on the SPC700.
+        self.ram[usize::from(address)] = value;
+    }
+
+    /// Enters the hardware IPL uploader without changing the simple PC=0
+    /// setup used by the existing instruction tests.
+    pub fn boot_spc700(&mut self) {
+        self.control = 0xb0;
+        self.timer_targets = [0; 3];
+        self.timer_stage2 = [0; 3];
+        self.timer_outputs = [0; 3];
+        self.timer_stage1_cycles = [0; 3];
+        self.spc700 = Spc700 {
+            sp: 0xef,
+            pc: 0xffc0,
+            ..Spc700::default()
+        };
+    }
+
     pub fn step_spc700(&mut self) -> u32 {
-        // The four CPU-visible ports are also the SPC700's F4-F7 I/O
-        // registers.  Mirroring them at the execution boundary keeps the
-        // small core useful for boot-RAM and communication tests without
-        // pretending that the DSP is ordinary RAM.
-        self.ram[0x00f4..0x00f8].copy_from_slice(&self.ports);
+        self.stage_spc_io();
+        if self.control & 0x80 != 0 {
+            self.ram[0xffc0..].copy_from_slice(&SPC_IPL_ROM);
+        }
+        let pc = self.spc700.pc;
+        let opcode = self.ram[usize::from(pc)];
+        let direct_io_write = self.direct_io_write_address(pc, opcode);
+        let direct_io_read = self.direct_io_read_address(pc, opcode);
         let cycles = self.spc700.step(&mut self.ram);
-        self.ports.copy_from_slice(&self.ram[0x00f4..0x00f8]);
+        self.sync_spc_io(direct_io_write);
+        if let Some(address @ 0xfd..=0xff) = direct_io_read {
+            self.timer_outputs[usize::from(address - 0xfd)] = 0;
+            self.ram[usize::from(address)] = 0;
+        }
+        self.advance_timers(cycles);
         cycles
+    }
+
+    fn stage_spc_io(&mut self) {
+        self.ram[0x00f0] = 0;
+        self.ram[0x00f1] = 0;
+        self.ram[0x00f2] = self.dsp_address;
+        self.ram[0x00f3] = self.read_dsp_data();
+        self.ram[0x00f4..0x00f8].copy_from_slice(&self.ports);
+        self.ram[0x00fa..0x00fd].fill(0);
+        for timer in 0..3 {
+            self.ram[0x00fd + timer] = self.timer_outputs[timer] & 0x0f;
+        }
+    }
+
+    fn sync_spc_io(&mut self, direct_io_write: Option<u8>) {
+        if self.ram[0x00f1] != 0 || direct_io_write == Some(0xf1) {
+            self.write_spc_io(0xf1, self.ram[0x00f1]);
+        }
+        if self.ram[0x00f2] != self.dsp_address {
+            self.write_spc_io(0xf2, self.ram[0x00f2]);
+        }
+        if self.ram[0x00f3] != self.read_dsp_data() {
+            self.write_spc_io(0xf3, self.ram[0x00f3]);
+        }
+        for timer in 0..3 {
+            let address = 0xfa + timer as u8;
+            if self.ram[usize::from(address)] != 0 || direct_io_write == Some(address) {
+                self.write_spc_io(address, self.ram[usize::from(address)]);
+            }
+        }
+        self.ports.copy_from_slice(&self.ram[0x00f4..0x00f8]);
+    }
+
+    fn direct_io_write_address(&self, pc: u16, opcode: u8) -> Option<u8> {
+        let operand = |offset: u16| self.ram[usize::from(pc.wrapping_add(offset))];
+        let direct = |value: u8| self.spc700.direct_address(value) as u8;
+        match opcode {
+            0x8f => Some(direct(operand(2))), // MOV d,#i
+            0xc4 => Some(direct(operand(1))), // MOV d,A
+            0xd4 => Some(direct(operand(1).wrapping_add(self.spc700.x))),
+            0xc6 => Some(direct(self.spc700.x)),
+            0xd8 => Some(direct(operand(1))),
+            0xcb => Some(direct(operand(1))),
+            0xfa => Some(direct(operand(2))), // MOV dd,ds
+            0x18 | 0x29 | 0x49 | 0x78 | 0x98 | 0xa9 => Some(direct(operand(2))),
+            _ => None,
+        }
+    }
+
+    fn direct_io_read_address(&self, pc: u16, opcode: u8) -> Option<u8> {
+        let operand = |offset: u16| self.ram[usize::from(pc.wrapping_add(offset))];
+        let direct = |value: u8| self.spc700.direct_address(value) as u8;
+        match opcode {
+            0x04 | 0x24 | 0x44 | 0x64 | 0x84 | 0xa4 | 0xe4 | 0xf8 | 0xeb => {
+                Some(direct(operand(1)))
+            }
+            0x14 | 0x34 | 0x54 | 0x74 | 0x94 | 0xb4 | 0xf4 | 0xfb => {
+                Some(direct(operand(1).wrapping_add(self.spc700.x)))
+            }
+            0x06 | 0x26 | 0x46 | 0x66 | 0x86 | 0xa6 | 0xe6 => Some(direct(self.spc700.x)),
+            0xba => Some(direct(operand(1))),
+            _ => None,
+        }
+    }
+
+    fn write_spc_control(&mut self, value: u8) {
+        let old = self.control;
+        self.control = value;
+        if value & 0x10 != 0 {
+            self.ports[0] = 0;
+            self.ports[1] = 0;
+        }
+        if value & 0x20 != 0 {
+            self.ports[2] = 0;
+            self.ports[3] = 0;
+        }
+        self.ram[0x00f4..0x00f8].copy_from_slice(&self.ports);
+        for timer in 0..3 {
+            let mask = 1 << timer;
+            if old & mask == 0 && value & mask != 0 {
+                self.timer_stage2[timer] = 0;
+                self.timer_outputs[timer] = 0;
+            }
+        }
+    }
+
+    fn advance_timers(&mut self, cycles: u32) {
+        for timer in 0..3 {
+            let period = if timer == 2 { 16 } else { 128 };
+            self.timer_stage1_cycles[timer] =
+                self.timer_stage1_cycles[timer].saturating_add(cycles as u16);
+            while self.timer_stage1_cycles[timer] >= period {
+                self.timer_stage1_cycles[timer] -= period;
+                if self.control & (1 << timer) == 0 {
+                    continue;
+                }
+                self.timer_stage2[timer] = self.timer_stage2[timer].wrapping_add(1);
+                if self.timer_stage2[timer] == self.timer_targets[timer] {
+                    self.timer_stage2[timer] = 0;
+                    self.timer_outputs[timer] = (self.timer_outputs[timer] + 1) & 0x0f;
+                }
+            }
+        }
     }
 }
 
@@ -1818,5 +1996,72 @@ mod tests {
         assert_eq!(apu.spc700.pc, 13);
         assert_eq!(apu.ram[0x40], 0);
         assert_eq!(apu.spc700.sp, 0xef);
+    }
+
+    #[test]
+    fn spc700_io_overlay_reads_ports_and_round_trips_dsp_registers() {
+        let mut apu = Apu::default();
+        apu.write_cpu_port(0, 0x12);
+        apu.ram[..11].copy_from_slice(&[
+            0xe4, 0xf4, // MOV A,$F4
+            0x8f, 0x25, 0xf2, // MOV $F2,#$25
+            0x8f, 0x5a, 0xf3, // MOV $F3,#$5A
+            0xe4, 0xf3, // MOV A,$F3
+            0xff,
+        ]);
+
+        assert_eq!(apu.step_spc700(), 3);
+        assert_eq!(apu.spc700.a, 0x12);
+        assert_eq!(apu.step_spc700(), 5);
+        assert_eq!(apu.dsp_address, 0x25);
+        assert_eq!(apu.step_spc700(), 5);
+        assert_eq!(apu.dsp[0x25], 0x5a);
+        assert_eq!(apu.step_spc700(), 3);
+        assert_eq!(apu.spc700.a, 0x5a);
+
+        apu.write_spc_io(0xf1, 0x01);
+        apu.ram[apu.spc700.pc as usize..][..3].copy_from_slice(&[0x8f, 0x00, 0xf1]);
+        assert_eq!(apu.step_spc700(), 5); // MOV $F1,#$00 disables timer 0
+        assert_eq!(apu.control & 0x01, 0);
+    }
+
+    #[test]
+    fn spc700_timers_tick_at_hardware_dividers_and_read_clear_outputs() {
+        let mut apu = Apu::default();
+        apu.write_spc_io(0xfa, 0x01); // timer 0: one stage-1 tick per output tick
+        apu.write_spc_io(0xf1, 0x01); // enable timer 0
+        apu.ram[0] = 0x00; // NOP, two SPC cycles
+
+        for _ in 0..64 {
+            assert_eq!(apu.step_spc700(), 2);
+        }
+
+        let pc = apu.spc700.pc as usize;
+        apu.ram[pc..pc + 2].copy_from_slice(&[0xe4, 0xfd]); // MOV A,$FD
+        assert_eq!(apu.step_spc700(), 3);
+        assert_eq!(apu.spc700.a, 1);
+        assert_eq!(apu.read_spc_io(0xfd), 0);
+
+        let mut timer2 = Apu::default();
+        timer2.write_spc_io(0xfc, 0x01);
+        timer2.write_spc_io(0xf1, 0x04); // enable timer 2
+        timer2.ram[0] = 0x00;
+        for _ in 0..8 {
+            timer2.step_spc700();
+        }
+        assert_eq!(timer2.read_spc_io(0xff), 1);
+    }
+
+    #[test]
+    fn spc700_boot_entry_exposes_the_ipl_uploader() {
+        let mut apu = Apu::default();
+        apu.boot_spc700();
+
+        assert_eq!(apu.spc700.pc, 0xffc0);
+        assert_eq!(apu.spc700.sp, 0xef);
+        assert_eq!(apu.control, 0xb0);
+        assert_eq!(apu.step_spc700(), 2); // MOV X,#$EF
+        assert_eq!(apu.spc700.x, 0xef);
+        assert_eq!(apu.spc700.pc, 0xffc2);
     }
 }
