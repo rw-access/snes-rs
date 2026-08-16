@@ -7,13 +7,3 @@ pub struct FrameOutput<'a> {
     pub width: u16,
     pub height: u16,
 }
-
-impl<'a> FrameOutput<'a> {
-    pub(crate) fn empty() -> Self {
-        Self {
-            pixels: &[],
-            width: 0,
-            height: 0,
-        }
-    }
-}

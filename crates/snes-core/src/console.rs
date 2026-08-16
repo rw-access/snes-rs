@@ -6,7 +6,7 @@ use crate::{
     controller::ControllerState,
     cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep},
     dma::Dma,
-    ppu::Ppu,
+    ppu::{Ppu, SCREEN_HEIGHT, SCREEN_WIDTH},
     video::FrameOutput,
 };
 
@@ -21,6 +21,7 @@ pub struct Console {
     dma: Dma,
     controller: ControllerState,
     timing: TimingState,
+    framebuffer: Vec<u32>,
 }
 
 impl Console {
@@ -36,10 +37,11 @@ impl Console {
             rom_identity,
             cartridge: Box::new(RomOnlyCartridge::new(rom)),
             wram: vec![0; 128 * 1024],
-            ppu: Ppu,
-            dma: Dma,
+            ppu: Ppu::default(),
+            dma: Dma::default(),
             controller: ControllerState::default(),
             timing: TimingState::default(),
+            framebuffer: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT],
         })
     }
 
@@ -50,9 +52,12 @@ impl Console {
         self.dma = Dma::default();
         self.controller = ControllerState::default();
         self.timing = TimingState::default();
+        self.framebuffer.fill(0);
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
+            ppu: &mut self.ppu,
+            controller: &mut self.controller,
         };
         self.cpu.reset_with_bus(&mut bus);
     }
@@ -62,6 +67,8 @@ impl Console {
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
+            ppu: &mut self.ppu,
+            controller: &mut self.controller,
         };
         let step = self.cpu.step_with_bus(&mut bus, None);
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
@@ -72,6 +79,8 @@ impl Console {
         let mut bus = ConsoleBus {
             wram: &mut self.wram,
             cartridge: &mut *self.cartridge,
+            ppu: &mut self.ppu,
+            controller: &mut self.controller,
         };
         let step = self.cpu.step_with_bus(&mut bus, Some(trace));
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
@@ -95,7 +104,12 @@ impl Console {
 
     /// Produces the next video frame.
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
-        FrameOutput::empty()
+        self.ppu.render_frame(&mut self.framebuffer);
+        FrameOutput {
+            pixels: &self.framebuffer,
+            width: SCREEN_WIDTH as u16,
+            height: SCREEN_HEIGHT as u16,
+        }
     }
 
     /// Reads a byte through the future complete SNES bus.
@@ -122,7 +136,7 @@ impl Console {
             rom_identity: self.rom_identity,
             cpu: self.cpu.snapshot(),
             wram: self.wram.clone(),
-            ppu: self.ppu,
+            ppu: self.ppu.clone(),
             dma: self.dma,
             controller: self.controller,
             timing: self.timing,
@@ -141,7 +155,7 @@ impl Console {
         }
         self.cpu.restore(state.cpu);
         self.wram.copy_from_slice(&state.wram);
-        self.ppu = state.ppu;
+        self.ppu = state.ppu.clone();
         self.dma = state.dma;
         self.controller = state.controller;
         self.timing = state.timing;
@@ -152,6 +166,8 @@ impl Console {
 struct ConsoleBus<'a> {
     wram: &'a mut [u8],
     cartridge: &'a mut dyn CartridgeDevice,
+    ppu: &'a mut Ppu,
+    controller: &'a mut ControllerState,
 }
 
 impl CpuBus for ConsoleBus<'_> {
@@ -160,6 +176,12 @@ impl CpuBus for ConsoleBus<'_> {
         if let Some(index) = wram_index(raw, self.wram.len()) {
             return self.wram[index];
         }
+        if let Some(register) = ppu_register(raw) {
+            return self.ppu.read_register(register);
+        }
+        if raw & 0xffff == 0x4016 {
+            return self.controller.read_serial();
+        }
         self.cartridge.read(address)
     }
 
@@ -167,10 +189,22 @@ impl CpuBus for ConsoleBus<'_> {
         let raw = address.get();
         if let Some(index) = wram_index(raw, self.wram.len()) {
             self.wram[index] = value;
+        } else if let Some(register) = ppu_register(raw) {
+            self.ppu.write_register(register, value);
+        } else if raw & 0xffff == 0x4016 {
+            self.controller.write_strobe(value);
         } else {
             self.cartridge.write(address, value);
         }
     }
+}
+
+fn ppu_register(address: u32) -> Option<u16> {
+    let bank = address >> 16;
+    let offset = address & 0xffff;
+    ((bank <= 0x3f || (0x80..=0xbf).contains(&bank))
+        && (0x2100..=0x213f).contains(&offset))
+        .then_some(offset as u16)
 }
 
 fn wram_index(address: u32, wram_len: usize) -> Option<usize> {
@@ -273,6 +307,8 @@ mod tests {
         let mut bus = ConsoleBus {
             wram: &mut console.wram,
             cartridge: &mut *console.cartridge,
+            ppu: &mut console.ppu,
+            controller: &mut console.controller,
         };
         bus.write(Address24::new(0x000123), 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x7e0123)), 0xa5);
