@@ -17,6 +17,15 @@ SNES `.sfc`/`.smc` ROM. Use `--host 0.0.0.0` when testing from another device
 on the local network.
 
 The page provides keyboard and touch controls, optional Web Audio playback,
-save/restore state, and hold-to-rewind. Web Audio is resampled to the browser
-output rate when needed. Add `?debug=1` to collect browser errors at
-`/__debug` while developing.
+save/restore state, hold-to-rewind, and a recording workflow. Web Audio is
+resampled to the browser output rate when needed. Add `?debug=1` to collect
+browser errors at `/__debug` while developing.
+
+## Capturing a play sequence
+
+Load a ROM, press `● Record`, play normally, and include any rewind with `R`
+or the on-screen Rewind button. Press `Stop & upload` when finished. The
+server saves one JSON transcript outside the repository, by default under
+`/tmp/snes-rs-captures/`. Each transcript contains controller state for every
+emulated frame plus button and rewind events, so it can be replayed later and
+rendered into a video. Use `--record-dir PATH` to choose another destination.

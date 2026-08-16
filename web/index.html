@@ -21,6 +21,10 @@
         <button id="snapshot-button" type="button" disabled>Save state</button>
         <button id="restore-button" type="button" disabled>Restore state</button>
         <button id="rewind-button" type="button" disabled>Rewind</button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
+        <button id="record-button" class="record-button" type="button" disabled>● Record</button>
+        <button id="stop-record-button" type="button" disabled>Stop &amp; upload</button>
+        <span id="recording-status" class="recording-status" role="status">Recording is off</span>
       </header>
 
       <section class="screen-wrap" aria-label="SNES screen">
@@ -52,8 +56,8 @@
         </div>
       </section>
 
-      <p class="hint">Keyboard: WASD or arrows, J/K or Z/X, U/I/O/P for Y/X/L/R, Shift, Enter. Hold R or Rewind to go backward. M toggles mute. Touch controls work on mobile.</p>
+      <p class="hint">Keyboard: WASD or arrows, J/K or Z/X, U/I/O/P for Y/X/L/R, Shift, Enter. Hold R or Rewind to go backward. M toggles mute. Touch controls work on mobile. Start recording before you play to send the input sequence to the server.</p>
     </main>
-    <script type="module" src="app.js?v=2"></script>
+    <script type="module" src="app.js?v=3"></script>
   </body>
 </html>

@@ -2,6 +2,7 @@ import init, { SnesWeb } from "./pkg/snes_wasm.js";
 
 const debugEnabled = new URLSearchParams(location.search).get("debug") === "1";
 const debugEndpoint = debugEnabled ? new URL("__debug", document.baseURI).href : null;
+const recordEndpoint = new URL("__record", document.baseURI).href;
 function debugValue(value) {
   if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
   if (typeof value === "string") return value;
@@ -24,10 +25,96 @@ const audioButton = document.querySelector("#audio-button");
 const snapshotButton = document.querySelector("#snapshot-button");
 const restoreButton = document.querySelector("#restore-button");
 const rewindButton = document.querySelector("#rewind-button");
+const recordButton = document.querySelector("#record-button");
+const stopRecordButton = document.querySelector("#stop-record-button");
+const recordingStatus = document.querySelector("#recording-status");
 const BUTTONS = Object.freeze({ b: 1 << 0, y: 1 << 1, select: 1 << 2, start: 1 << 3, up: 1 << 4, down: 1 << 5, left: 1 << 6, right: 1 << 7, a: 1 << 8, x: 1 << 9, l: 1 << 10, r: 1 << 11 });
 const FRAME_MS = 1000 / 60;
-let emulator = null, savedSnapshot = null, heldButtons = 0, rewinding = false, previousTime = 0, accumulator = 0;
+let emulator = null, romName = null, savedSnapshot = null, heldButtons = 0, rewinding = false, previousTime = 0, accumulator = 0;
 let image = null;
+let recording = null;
+
+function jsonNumber(value) {
+  return value == null ? null : typeof value === "bigint" ? Number(value) : value;
+}
+
+function recordingTime() {
+  return recording ? Math.max(0, Math.round(performance.now() - recording.started_perf_at)) : 0;
+}
+
+function recordInputEvent(type, details = {}) {
+  if (!recording) return;
+  recording.input_events.push({ t_ms: recordingTime(), type, buttons: heldButtons, ...details });
+}
+
+function recordFrame(kind, metadata, details = {}) {
+  if (!recording) return;
+  recording.frames.push({
+    index: recording.frames.length,
+    t_ms: recordingTime(),
+    kind,
+    buttons: heldButtons,
+    emulator_frame: jsonNumber(metadata?.frame_number),
+    ...details,
+  });
+  recordingStatus.textContent = `Recording · ${(recordingTime() / 1000).toFixed(1)}s · ${recording.frames.length} frames`;
+}
+
+function setRecordingButtons(active) {
+  recordButton.disabled = !emulator || active;
+  stopRecordButton.disabled = !active;
+  recordButton.classList.toggle("recording", active);
+}
+
+function startRecording() {
+  if (!emulator || recording) return;
+  const metadata = emulator.frame_metadata();
+  recording = {
+    version: 1,
+    source: "snes-rs-browser",
+    rom_name: romName,
+    frame_rate: 60,
+    started_at: new Date().toISOString(),
+    started_perf_at: performance.now(),
+    started_frame: jsonNumber(metadata.frame_number),
+    frames: [],
+    input_events: [],
+  };
+  recordInputEvent("record-start");
+  setRecordingButtons(true);
+  recordingStatus.textContent = "Recording · 0.0s · 0 frames";
+}
+
+async function stopRecording() {
+  if (!recording) return;
+  if (rewinding) stopRewind();
+  const payload = {
+    ...recording,
+    stopped_at: new Date().toISOString(),
+    stopped_frame: jsonNumber(emulator?.frame_metadata()?.frame_number),
+  };
+  window.lastRecordingPayload = payload;
+  recording = null;
+  setRecordingButtons(false);
+  recordingStatus.textContent = "Uploading…";
+  try {
+    const response = await fetch(recordEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.text();
+    let result = {};
+    try { result = JSON.parse(body); } catch (_) {}
+    if (!response.ok || !result.ok) throw new Error(result.error || body || `HTTP ${response.status}`);
+    recordingStatus.textContent = `Saved · ${result.frames} frames`;
+    setStatus(`Recording saved on server as ${result.filename}`);
+  } catch (error) {
+    reportDebug("record-upload", error);
+    recordingStatus.textContent = `Upload failed — retry: ${error?.message ?? error}`;
+    setStatus(`Could not upload recording: ${error?.message ?? error}`);
+  }
+}
 
 class AudioScheduler {
   constructor() {
@@ -123,19 +210,42 @@ function drawFrame(schedule = true) {
     try { audio.schedule(emulator.audio_buffer(), metadata.audio_samples, metadata.audio_sample_rate, metadata.audio_discontinuity); }
     catch (error) { reportDebug("audio-scheduling", error); setStatus(`Frame ${metadata.frame_number} · audio unavailable`); }
   }
+  recordFrame("frame", metadata);
   return metadata;
 }
 function rewindFrame() {
-  if (!emulator || !emulator.rewind()) return false;
+  if (!emulator) return false;
+  const available = emulator.rewind();
   const metadata = emulator.frame_metadata();
   render(metadata);
   setStatus(`Rewinding · Frame ${metadata.frame_number}`);
-  return true;
+  recordFrame("rewind", metadata, { available });
+  return available;
 }
 function updateButtons() { if (emulator && !rewinding) emulator.set_controller(heldButtons); }
-function setButton(name, pressed) { if (pressed) heldButtons |= BUTTONS[name]; else heldButtons &= ~BUTTONS[name]; updateButtons(); }
-function startRewind() { if (!emulator || rewinding) return; rewinding = true; audio.flush(); rewindButton.classList.add("pressed"); accumulator = 0; setStatus("Rewinding…"); }
-function stopRewind() { if (!rewinding) return; rewinding = false; rewindButton.classList.remove("pressed"); updateButtons(); previousTime = performance.now(); accumulator = 0; }
+function setButton(name, pressed) {
+  if (pressed) heldButtons |= BUTTONS[name]; else heldButtons &= ~BUTTONS[name];
+  recordInputEvent(pressed ? "button-down" : "button-up", { button: name });
+  updateButtons();
+}
+function startRewind() {
+  if (!emulator || rewinding) return;
+  rewinding = true;
+  audio.flush();
+  rewindButton.classList.add("pressed");
+  accumulator = 0;
+  recordInputEvent("rewind-start");
+  setStatus("Rewinding…");
+}
+function stopRewind() {
+  if (!rewinding) return;
+  rewinding = false;
+  rewindButton.classList.remove("pressed");
+  recordInputEvent("rewind-stop");
+  updateButtons();
+  previousTime = performance.now();
+  accumulator = 0;
+}
 
 async function loadRom(file) {
   try {
@@ -146,6 +256,7 @@ async function loadRom(file) {
     emulator = null;
     previousEmulator?.free();
     emulator = SnesWeb.load_rom(bytes);
+    romName = file.name;
     savedSnapshot = null;
     heldButtons = 0;
     image = null;
@@ -153,6 +264,11 @@ async function loadRom(file) {
     snapshotButton.disabled = false;
     restoreButton.disabled = true;
     rewindButton.disabled = false;
+    recording = null;
+    recordButton.disabled = false;
+    stopRecordButton.disabled = true;
+    recordButton.classList.remove("recording");
+    recordingStatus.textContent = "Recording is off";
     previousTime = performance.now();
     accumulator = FRAME_MS;
     updateButtons();
@@ -164,6 +280,9 @@ async function loadRom(file) {
     snapshotButton.disabled = true;
     restoreButton.disabled = true;
     rewindButton.disabled = true;
+    recording = null;
+    setRecordingButtons(false);
+    recordingStatus.textContent = "Recording is off";
     setStatus(`Could not load ROM: ${error?.message ?? error}`);
   }
 }
@@ -176,6 +295,8 @@ restoreButton.addEventListener("click", () => {
   try { emulator.restore_snapshot(savedSnapshot); audio.flush(); accumulator = FRAME_MS; setStatus("State restored"); }
   catch (error) { reportDebug("snapshot-restore", error); setStatus(`Could not restore state: ${error?.message ?? error}`); }
 });
+recordButton.addEventListener("click", startRecording);
+stopRecordButton.addEventListener("click", () => { void stopRecording(); });
 rewindButton.addEventListener("pointerdown", event => { event.preventDefault(); rewindButton.setPointerCapture(event.pointerId); startRewind(); });
 for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) rewindButton.addEventListener(name, event => { event.preventDefault(); stopRewind(); });
 for (const button of document.querySelectorAll("[data-button]")) {
@@ -188,7 +309,7 @@ window.addEventListener("keydown", event => { const key = event.key.length === 1
 window.addEventListener("keyup", event => { const key = event.key.length === 1 ? event.key.toLowerCase() : event.key; if (key === "r") { event.preventDefault(); stopRewind(); return; } const name = keyboard.get(key); if (name) { event.preventDefault(); setButton(name, false); } });
 window.addEventListener("blur", () => { heldButtons = 0; stopRewind(); updateButtons(); });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && audio.context) audio.enable().catch(error => reportDebug("audio-resume", error)); });
-function tick(now) { try { if (!previousTime) previousTime = now; accumulator += Math.min(now - previousTime, 250); previousTime = now; let count = 0; while (emulator && accumulator >= FRAME_MS && count++ < 4) { if (rewinding) rewindFrame(); else drawFrame(); accumulator -= FRAME_MS; } } catch (error) { reportDebug("emulation-frame", error); setStatus(`Emulation stopped: ${error?.message ?? error}`); emulator = null; savedSnapshot = null; rewinding = false; snapshotButton.disabled = true; restoreButton.disabled = true; rewindButton.disabled = true; } requestAnimationFrame(tick); }
+function tick(now) { try { if (!previousTime) previousTime = now; accumulator += Math.min(now - previousTime, 250); previousTime = now; let count = 0; while (emulator && accumulator >= FRAME_MS && count++ < 4) { if (rewinding) rewindFrame(); else drawFrame(); accumulator -= FRAME_MS; } } catch (error) { reportDebug("emulation-frame", error); setStatus(`Emulation stopped: ${error?.message ?? error}`); emulator = null; savedSnapshot = null; recording = null; rewinding = false; snapshotButton.disabled = true; restoreButton.disabled = true; rewindButton.disabled = true; setRecordingButtons(false); recordingStatus.textContent = "Recording is off"; } requestAnimationFrame(tick); }
 try {
   await init("./pkg/snes_wasm_bg.wasm?v=2");
   requestAnimationFrame(tick);
