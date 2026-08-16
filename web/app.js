@@ -123,6 +123,8 @@ class AudioScheduler {
     this.nextTime = 0;
     this.sources = new Set();
     this.prefillSeconds = 0.05;
+    this.chunkFrames = 2048;
+    this.pendingSamples = [];
     this.muted = false;
   }
   updateButton() { audioButton.textContent = this.muted ? "Audio muted" : this.context?.state === "running" ? "Audio enabled" : "Enable audio"; }
@@ -150,6 +152,7 @@ class AudioScheduler {
     if (!this.context) return;
     for (const source of this.sources) { try { source.stop(); } catch (_) {} }
     this.sources.clear();
+    this.pendingSamples.length = 0;
     this.nextTime = this.context.currentTime + this.prefillSeconds;
   }
   schedule(interleaved, frames, rate, discontinuity) {
@@ -159,14 +162,30 @@ class AudioScheduler {
     const samples = rate === this.context.sampleRate
       ? interleaved.subarray(0, sourceFrames * 2)
       : resampleStereo(interleaved.subarray(0, sourceFrames * 2), rate, this.context.sampleRate);
+    if (!samples.length) return;
+    for (const sample of samples) this.pendingSamples.push(sample);
+    const chunkSamples = this.chunkFrames * 2;
+    while (this.pendingSamples.length >= chunkSamples) {
+      const chunk = Float32Array.from(this.pendingSamples.splice(0, chunkSamples));
+      this.scheduleChunk(chunk);
+    }
+  }
+  scheduleChunk(samples) {
     const outputFrames = Math.floor(samples.length / 2);
-    if (!outputFrames) return;
+    if (!outputFrames || !this.context) return;
     const output = this.context.createBuffer(2, outputFrames, this.context.sampleRate);
     const left = output.getChannelData(0), right = output.getChannelData(1);
     for (let i = 0; i < outputFrames; i++) { left[i] = samples[i * 2]; right[i] = samples[i * 2 + 1]; }
-    const source = this.context.createBufferSource(); source.buffer = output; source.connect(this.context.destination);
-    const start = Math.max(this.nextTime, this.context.currentTime + .01); source.start(start); this.nextTime = start + outputFrames / this.context.sampleRate;
-    this.sources.add(source); source.addEventListener("ended", () => this.sources.delete(source), { once: true });
+    const now = this.context.currentTime;
+    if (this.nextTime < now - this.prefillSeconds || this.nextTime > now + 1) this.nextTime = now + this.prefillSeconds;
+    const source = this.context.createBufferSource();
+    source.buffer = output;
+    source.connect(this.context.destination);
+    const start = Math.max(this.nextTime, now + .01);
+    source.start(start);
+    this.nextTime = start + outputFrames / this.context.sampleRate;
+    this.sources.add(source);
+    source.addEventListener("ended", () => this.sources.delete(source), { once: true });
   }
 }
 const audio = new AudioScheduler();
@@ -311,7 +330,7 @@ window.addEventListener("blur", () => { heldButtons = 0; stopRewind(); updateBut
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && audio.context) audio.enable().catch(error => reportDebug("audio-resume", error)); });
 function tick(now) { try { if (!previousTime) previousTime = now; accumulator += Math.min(now - previousTime, 250); previousTime = now; let count = 0; while (emulator && accumulator >= FRAME_MS && count++ < 4) { if (rewinding) rewindFrame(); else drawFrame(); accumulator -= FRAME_MS; } } catch (error) { reportDebug("emulation-frame", error); setStatus(`Emulation stopped: ${error?.message ?? error}`); emulator = null; savedSnapshot = null; recording = null; rewinding = false; snapshotButton.disabled = true; restoreButton.disabled = true; rewindButton.disabled = true; setRecordingButtons(false); recordingStatus.textContent = "Recording is off"; } requestAnimationFrame(tick); }
 try {
-  await init("./pkg/snes_wasm_bg.wasm?v=2");
+  await init("./pkg/snes_wasm_bg.wasm?v=3");
   requestAnimationFrame(tick);
 } catch (error) {
   reportDebug("wasm-init", error);

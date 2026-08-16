@@ -85,6 +85,7 @@ impl Console {
 
     /// Advances one instruction according to the future CPU execution plan.
     pub fn step_instruction(&mut self) -> CpuStep {
+        self.ppu.set_raster_scanline(self.timing.scanline);
         let pending = self.pending_interrupt();
         match pending {
             Some(InterruptKind::Nmi) => self.timing.pending_nmi = false,
@@ -124,6 +125,7 @@ impl Console {
     }
 
     pub fn step_instruction_traced(&mut self, trace: &mut dyn TraceSink) -> CpuStep {
+        self.ppu.set_raster_scanline(self.timing.scanline);
         let pending = self.pending_interrupt();
         match pending {
             Some(InterruptKind::Nmi) => self.timing.pending_nmi = false,
@@ -163,6 +165,7 @@ impl Console {
     }
 
     pub fn request_interrupt(&mut self, kind: InterruptKind) -> CpuStep {
+        self.ppu.set_raster_scanline(self.timing.scanline);
         match kind {
             InterruptKind::Nmi => self.timing.pending_nmi = false,
             InterruptKind::Irq => self.timing.pending_irq = false,
@@ -239,8 +242,10 @@ impl Console {
                 break;
             }
             if self.timing.scanline == 0 {
+                self.ppu.begin_raster_frame();
                 self.dma.begin_hdma_frame();
             }
+            self.ppu.set_raster_scanline(self.timing.scanline);
             let mut dma = self.dma;
             let mut bus = ConsoleBus {
                 wram: &mut self.wram,

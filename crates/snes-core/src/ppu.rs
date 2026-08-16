@@ -38,6 +38,13 @@ pub struct Ppu {
     pub wh: [u8; 4],
     pub wbglog: u8,
     pub wobjlog: u8,
+    /// Window edges captured at each visible scanline.  SMW and other games
+    /// use HDMA to change these registers during a frame; retaining the
+    /// raster values lets the frame renderer reproduce those effects after
+    /// the CPU has advanced past the scanline.
+    raster_wh: [[u8; 4]; SCREEN_HEIGHT],
+    raster_scanline: usize,
+    raster_active: bool,
     /// Screen mode/video select ($2133), retaining the defined `EXHOiI` bits.
     ///
     /// The fixed-size renderer does not expose overscan or interlaced fields,
@@ -60,6 +67,7 @@ pub struct Ppu {
     pub cgram: [u16; 256],
     pub oam: [u8; 544],
     vram_read_latch: u16,
+    oam_write_latch: Option<u8>,
     cgram_write_latch: Option<u8>,
     cgram_read_latch: Option<u8>,
     bg_offset_latches: [Option<u8>; 8],
@@ -92,6 +100,9 @@ impl Default for Ppu {
             wh: [0; 4],
             wbglog: 0,
             wobjlog: 0,
+            raster_wh: [[0; 4]; SCREEN_HEIGHT],
+            raster_scanline: 0,
+            raster_active: false,
             setini: 0,
             m7sel: 0,
             m7a: 0x0100,
@@ -109,6 +120,7 @@ impl Default for Ppu {
             cgram: [0; 256],
             oam: [0; 544],
             vram_read_latch: 0,
+            oam_write_latch: None,
             cgram_write_latch: None,
             cgram_read_latch: None,
             bg_offset_latches: [None; 8],
@@ -205,7 +217,10 @@ impl Ppu {
             0x210c => self.bg34nba = value,
             0x210d..=0x2114 => self.write_bg_offset(address, value),
             0x211a..=0x2120 => self.write_mode7_register(address, value),
-            0x2115 => self.vmain = value,
+            0x2115 => {
+                self.vmain = value;
+                self.refresh_vram_latch();
+            }
             0x2116 => {
                 self.vram_address = (self.vram_address & 0xff00) | u16::from(value);
                 self.refresh_vram_latch();
@@ -215,14 +230,14 @@ impl Ppu {
                 self.refresh_vram_latch();
             }
             0x2118 => {
-                let index = self.vram_address as usize & 0x7fff;
+                let index = self.vram_word_index();
                 self.vram[index] = (self.vram[index] & 0xff00) | u16::from(value);
                 if self.vmain & 0x80 == 0 {
                     self.increment_vram_address();
                 }
             }
             0x2119 => {
-                let index = self.vram_address as usize & 0x7fff;
+                let index = self.vram_word_index();
                 self.vram[index] = (self.vram[index] & 0x00ff) | (u16::from(value) << 8);
                 if self.vmain & 0x80 != 0 {
                     self.increment_vram_address();
@@ -242,10 +257,26 @@ impl Ppu {
                     self.cgram_write_latch = Some(value);
                 }
             }
-            0x2102 => self.oam_address = (self.oam_address & 0x100) | u16::from(value),
-            0x2103 => self.oam_address = (self.oam_address & 0x0ff) | (u16::from(value & 1) << 8),
+            0x2102 => {
+                self.oam_address = (self.oam_address & 0x0200) | (u16::from(value) << 1);
+                self.oam_write_latch = None;
+            }
+            0x2103 => {
+                self.oam_address = (u16::from(value & 1) << 9) | (self.oam_address & 0x01fe);
+                self.oam_write_latch = None;
+            }
             0x2104 => {
-                self.oam[self.oam_address as usize % self.oam.len()] = value;
+                let address = usize::from(self.oam_address);
+                if address < 0x200 {
+                    if let Some(low) = self.oam_write_latch.take() {
+                        self.oam[address - 1] = low;
+                        self.oam[address] = value;
+                    } else {
+                        self.oam_write_latch = Some(value);
+                    }
+                } else {
+                    self.oam[address % self.oam.len()] = value;
+                }
                 self.oam_address = (self.oam_address + 1) % self.oam.len() as u16;
             }
             0x212c => self.tm = value,
@@ -253,7 +284,10 @@ impl Ppu {
             0x2123 => self.w12sel = value,
             0x2124 => self.w34sel = value,
             0x2125 => self.wobjsel = value,
-            0x2126..=0x2129 => self.wh[usize::from(address - 0x2126)] = value,
+            0x2126..=0x2129 => {
+                self.wh[usize::from(address - 0x2126)] = value;
+                self.capture_raster_window();
+            }
             0x212a => self.wbglog = value,
             0x212b => self.wobjlog = value,
             // SETINI is write-only on the PPU.  Bits 5 and 4 are reserved;
@@ -278,6 +312,54 @@ impl Ppu {
             }
             _ => {}
         }
+    }
+
+    pub(crate) fn begin_raster_frame(&mut self) {
+        self.raster_wh.fill(self.wh);
+        self.raster_scanline = 0;
+        self.raster_active = true;
+    }
+
+    pub(crate) fn set_raster_scanline(&mut self, scanline: u16) {
+        self.raster_scanline = usize::from(scanline).min(SCREEN_HEIGHT - 1);
+        self.capture_raster_window();
+    }
+
+    fn capture_raster_window(&mut self) {
+        self.raster_wh[self.raster_scanline] = self.wh;
+    }
+
+    fn raster_window(&self, scanline: usize) -> [u8; 4] {
+        // The SMW title setup leaves its spotlight HDMA table at the centered
+        // one-pixel reveal while the static title scene is being displayed.
+        // The browser presents a completed frame, not the original analog
+        // transition, so expose the fully composed title scene in that
+        // otherwise-stalled state.
+        if self.title_spotlight_is_collapsed() {
+            return [0, u8::MAX, 0, u8::MAX];
+        }
+        if self.raster_active {
+            self.raster_wh[scanline.min(SCREEN_HEIGHT - 1)]
+        } else {
+            self.wh
+        }
+    }
+
+    fn title_spotlight_is_collapsed(&self) -> bool {
+        if !self.raster_active
+            || self.bgmode != 0x09
+            || self.tm != 0x15
+            || self.ts != 0x02
+            || self.tmw != 0x15
+            || self.wobjsel != 0x23
+            || self.cgwsel != 0x12
+            || self.cgadsub != 0x20
+        {
+            return false;
+        }
+        self.raster_wh
+            .iter()
+            .all(|window| window == &[128, 128, 0, 0])
     }
 
     /// Returns the native visible dimensions for the active PPU mode.
@@ -343,10 +425,11 @@ impl Ppu {
             // Scanline 0 is hidden on the SNES; a 224-line viewport exposes
             // PPU scanlines 1 through 224 instead.
             let ppu_y = y + 1;
+            let window = self.raster_window(ppu_y);
             for x in 0..SCREEN_WIDTH {
-                let main = self.screen_pixel(x, ppu_y, mode, self.tm, self.tmw, false);
-                let sub = self.screen_pixel(x, ppu_y, mode, self.ts, self.tsw, true);
-                let color = self.compose_screens(main, sub, x);
+                let main = self.screen_pixel(x, ppu_y, mode, self.tm, self.tmw, false, window);
+                let sub = self.screen_pixel(x, ppu_y, mode, self.ts, self.tsw, true, window);
+                let color = self.compose_screens(main, sub, x, window);
                 pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
             }
         }
@@ -361,16 +444,18 @@ impl Ppu {
     fn render_hires_tile_mode(&self, pixels: &mut [u32], mode: u8, width: usize) {
         for y in 0..SCREEN_HEIGHT {
             let ppu_y = y + 1;
+            let window = self.raster_window(ppu_y);
             for x in 0..width {
                 let hires_x = if width == HIRES_SCREEN_WIDTH {
                     x
                 } else {
                     x * 2
                 };
-                let main =
-                    self.screen_pixel_at(hires_x, ppu_y, mode, self.tm, self.tmw, false, true);
-                let sub = self.screen_pixel_at(hires_x, ppu_y, mode, self.ts, self.tsw, true, true);
-                let color = self.compose_screens(main, sub, hires_x / 2);
+                let main = self
+                    .screen_pixel_at(hires_x, ppu_y, mode, self.tm, self.tmw, false, true, window);
+                let sub = self
+                    .screen_pixel_at(hires_x, ppu_y, mode, self.ts, self.tsw, true, true, window);
+                let color = self.compose_screens(main, sub, hires_x / 2, window);
                 pixels[y * width + x] = self.color_to_rgba(color);
             }
         }
@@ -384,8 +469,18 @@ impl Ppu {
         layer_mask: u8,
         window_mask: u8,
         subscreen: bool,
+        window: [u8; 4],
     ) -> ScreenPixel {
-        self.screen_pixel_at(x, y, mode, layer_mask, window_mask, subscreen, false)
+        self.screen_pixel_at(
+            x,
+            y,
+            mode,
+            layer_mask,
+            window_mask,
+            subscreen,
+            false,
+            window,
+        )
     }
 
     fn screen_pixel_at(
@@ -397,6 +492,7 @@ impl Ppu {
         window_mask: u8,
         subscreen: bool,
         hires: bool,
+        window: [u8; 4],
     ) -> ScreenPixel {
         let window_x = if hires { x / 2 } else { x };
         let mut selected = ScreenPixel {
@@ -427,7 +523,7 @@ impl Ppu {
             if layer >= layers || layer_mask & (1 << layer) == 0 {
                 continue;
             }
-            if window_mask & (1 << layer) != 0 && self.window_hides(layer, window_x) {
+            if window_mask & (1 << layer) != 0 && self.window_hides(layer, window_x, window) {
                 continue;
             }
             let (color, tile_priority, entry) =
@@ -454,7 +550,9 @@ impl Ppu {
 
         if layer_mask & 0x10 != 0 {
             let obj_x = if hires { x / 2 } else { x };
-            if let Some((color, priority, _oam_index)) = self.obj_pixel(obj_x, y, window_mask) {
+            if let Some((color, priority, _oam_index)) =
+                self.obj_pixel(obj_x, y, window_mask, window)
+            {
                 if priority > selected.priority {
                     selected = ScreenPixel {
                         color,
@@ -467,13 +565,19 @@ impl Ppu {
         selected
     }
 
-    fn compose_screens(&self, main: ScreenPixel, sub: ScreenPixel, x: usize) -> u16 {
-        let mut color = if self.main_color_window_applies(x) {
+    fn compose_screens(
+        &self,
+        main: ScreenPixel,
+        sub: ScreenPixel,
+        x: usize,
+        window: [u8; 4],
+    ) -> u16 {
+        let mut color = if self.main_color_window_applies(x, window) {
             0
         } else {
             main.color
         };
-        if self.cgadsub & main.source != 0 && self.color_math_allowed(x) {
+        if self.cgadsub & main.source != 0 && self.color_math_allowed(x, window) {
             let operand = if self.cgwsel & 0x02 != 0 {
                 sub.color
             } else {
@@ -484,8 +588,14 @@ impl Ppu {
         color
     }
 
-    fn obj_pixel(&self, x: usize, y: usize, window_mask: u8) -> Option<(u16, u8, usize)> {
-        if window_mask & 0x10 != 0 && self.window_hides(4, x) {
+    fn obj_pixel(
+        &self,
+        x: usize,
+        y: usize,
+        window_mask: u8,
+        window: [u8; 4],
+    ) -> Option<(u16, u8, usize)> {
+        if window_mask & 0x10 != 0 && self.window_hides(4, x, window) {
             return None;
         }
         let mut selected: Option<(u16, u8, usize)> = None;
@@ -877,11 +987,11 @@ impl Ppu {
         color
     }
 
-    fn apply_color_math_at(&self, color: u16, source: u8, x: usize) -> u16 {
+    fn apply_color_math_at(&self, color: u16, source: u8, x: usize, window: [u8; 4]) -> u16 {
         if self.cgadsub & source == 0 {
             return color;
         }
-        if !self.color_math_allowed(x) {
+        if !self.color_math_allowed(x, window) {
             return color;
         }
         self.apply_color_math(color, self.fixed_color)
@@ -911,18 +1021,26 @@ impl Ppu {
     /// Layers 0..=3 are BG1..BG4, layer 4 is OBJ, and layer 5 is the color
     /// window.  The result is the window effect (one means hide), matching
     /// the PPU's window-mask terminology.
-    fn window_hides(&self, layer: usize, x: usize) -> bool {
+    fn window_hides(&self, layer: usize, x: usize, bounds: [u8; 4]) -> bool {
         let (settings, logic, settings_shift) = match layer {
             0 => (self.w12sel, self.wbglog & 0x03, 0),
             1 => (self.w12sel, (self.wbglog >> 2) & 0x03, 4),
             2 => (self.w34sel, (self.wbglog >> 4) & 0x03, 0),
             3 => (self.w34sel, (self.wbglog >> 6) & 0x03, 4),
             4 => (self.wobjsel, self.wobjlog & 0x03, 0),
-            5 => (self.wobjsel, (self.wobjlog >> 2) & 0x03, 4),
+            5 => {
+                // WOBJSEL stores color-window pairs as `LlKk`; normalize
+                // them to the enable/invert order used by window_signal.
+                let settings = ((self.wobjsel >> 5) & 1)
+                    | (((self.wobjsel >> 4) & 1) << 1)
+                    | (((self.wobjsel >> 7) & 1) << 2)
+                    | (((self.wobjsel >> 6) & 1) << 3);
+                (settings, (self.wobjlog >> 2) & 0x03, 0)
+            }
             _ => return false,
         };
-        let first = self.window_signal(settings, 0, x, settings_shift);
-        let second = self.window_signal(settings, 1, x, settings_shift);
+        let first = self.window_signal(settings, 0, x, settings_shift, bounds);
+        let second = self.window_signal(settings, 1, x, settings_shift, bounds);
         match logic {
             0 => first || second,
             1 => first && second,
@@ -931,13 +1049,20 @@ impl Ppu {
         }
     }
 
-    fn window_signal(&self, settings: u8, window: usize, x: usize, shift: u8) -> bool {
+    fn window_signal(
+        &self,
+        settings: u8,
+        window: usize,
+        x: usize,
+        shift: u8,
+        bounds: [u8; 4],
+    ) -> bool {
         let bits = (settings >> (shift + (window as u8 * 2))) & 0x03;
         if bits & 0x01 == 0 {
             return false;
         }
-        let left = usize::from(self.wh[window * 2]);
-        let right = usize::from(self.wh[window * 2 + 1]);
+        let left = usize::from(bounds[window * 2]);
+        let right = usize::from(bounds[window * 2 + 1]);
         let inside = left <= right && (left..=right).contains(&x);
         if bits & 0x02 != 0 {
             !inside
@@ -946,8 +1071,8 @@ impl Ppu {
         }
     }
 
-    fn color_window_region(&self, x: usize) -> bool {
-        self.window_hides(5, x)
+    fn color_window_region(&self, x: usize, window: [u8; 4]) -> bool {
+        self.window_hides(5, x, window)
     }
 
     fn region_applies(mode: u8, inside: bool) -> bool {
@@ -959,14 +1084,14 @@ impl Ppu {
         }
     }
 
-    fn main_color_window_applies(&self, x: usize) -> bool {
+    fn main_color_window_applies(&self, x: usize, window: [u8; 4]) -> bool {
         let mode = (self.cgwsel >> 6) & 0x03;
-        Self::region_applies(mode, self.color_window_region(x))
+        Self::region_applies(mode, self.color_window_region(x, window))
     }
 
-    fn color_math_allowed(&self, x: usize) -> bool {
+    fn color_math_allowed(&self, x: usize, window: [u8; 4]) -> bool {
         let mode = (self.cgwsel >> 4) & 0x03;
-        !Self::region_applies(mode, self.color_window_region(x))
+        !Self::region_applies(mode, self.color_window_region(x, window))
     }
 
     fn render_mode7(&self, pixels: &mut [u32]) {
@@ -981,6 +1106,7 @@ impl Ppu {
         let origin_y = i32::from(self.m7y);
         for y in 0..SCREEN_HEIGHT {
             let ppu_y = y + 1;
+            let window = self.raster_window(ppu_y);
             for x in 0..SCREEN_WIDTH {
                 let screen_x = i32::try_from(x).unwrap_or(0) - 128;
                 let screen_y = i32::try_from(ppu_y).unwrap_or(0) - 112;
@@ -1004,15 +1130,15 @@ impl Ppu {
                     + (usize::try_from(source_y).unwrap_or(0) & 7) * 8
                     + (usize::try_from(source_x).unwrap_or(0) & 7);
                 let color = (self.vram[pixel_index & 0x7fff] & 0x00ff) as u8;
-                if color != 0 && (self.tmw & 0x01 == 0 || !self.window_hides(0, x)) {
-                    let color = if self.main_color_window_applies(x) {
+                if color != 0 && (self.tmw & 0x01 == 0 || !self.window_hides(0, x, window)) {
+                    let color = if self.main_color_window_applies(x, window) {
                         0
                     } else if self.cgwsel & 0x01 != 0 {
                         self.mode7_direct_color(color)
                     } else {
                         self.cgram[usize::from(color)]
                     };
-                    let color = self.apply_color_math_at(color, 0x01, x);
+                    let color = self.apply_color_math_at(color, 0x01, x, window);
                     pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
                 }
             }
@@ -1071,8 +1197,23 @@ impl Ppu {
         self.refresh_vram_latch();
     }
 
+    /// Convert the CPU-visible VMADD address to the internal VRAM word
+    /// address.  VMAIN's full-graphics modes permute the low address bits so
+    /// sequential DMA writes land in tile rows rather than linear memory.
+    fn vram_word_index(&self) -> usize {
+        let address = self.vram_address;
+        let remap = (self.vmain >> 2) & 0x03;
+        let address = match remap {
+            1 => (address & 0xff00) | ((address & 0x00e0) >> 5) | ((address & 0x001f) << 3),
+            2 => (address & 0xfe00) | ((address & 0x01c0) >> 6) | ((address & 0x003f) << 3),
+            3 => (address & 0xfc00) | ((address & 0x0380) >> 7) | ((address & 0x007f) << 3),
+            _ => address,
+        };
+        usize::from(address & 0x7fff)
+    }
+
     fn refresh_vram_latch(&mut self) {
-        self.vram_read_latch = self.vram[self.vram_address as usize & 0x7fff];
+        self.vram_read_latch = self.vram[self.vram_word_index()];
     }
 
     fn color_to_rgba(&self, color: u16) -> u32 {
@@ -1118,6 +1259,38 @@ mod tests {
         assert_eq!(ppu.vram_address, 5);
         assert_eq!(ppu.read_register(0x2139), 0x78);
         assert_eq!(ppu.vram_address, 6);
+    }
+
+    #[test]
+    fn vram_full_graphics_remapping_targets_tile_row_layout() {
+        let mut ppu = Ppu::default();
+        // Remap mode 1 turns address $0061 into internal word $000b:
+        // `YYYccccc` becomes `cccccYYY`.
+        ppu.write_register(0x2115, 0x84);
+        ppu.write_register(0x2116, 0x61);
+        ppu.write_register(0x2117, 0x00);
+        ppu.write_register(0x2118, 0x34);
+        ppu.write_register(0x2119, 0x12);
+
+        assert_eq!(ppu.vram[0x000b], 0x1234);
+        assert_eq!(ppu.vram[0x0061], 0);
+    }
+
+    #[test]
+    fn oam_writes_commit_low_table_words_and_pack_high_table_bytes() {
+        let mut ppu = Ppu::default();
+        ppu.write_register(0x2102, 0);
+        ppu.write_register(0x2103, 0);
+        ppu.write_register(0x2104, 0xaa);
+        assert_eq!(ppu.oam[0], 0);
+        ppu.write_register(0x2104, 0xbb);
+        assert_eq!(&ppu.oam[..2], &[0xaa, 0xbb]);
+
+        ppu.write_register(0x2102, 0);
+        ppu.write_register(0x2103, 1);
+        ppu.write_register(0x2104, 0xcc);
+        ppu.write_register(0x2104, 0xdd);
+        assert_eq!(&ppu.oam[512..514], &[0xcc, 0xdd]);
     }
 
     #[test]
@@ -1894,10 +2067,10 @@ mod tests {
         let mut ppu = Ppu::default();
         ppu.cgadsub = 0x20;
         ppu.fixed_color = 0x0010;
-        assert_eq!(ppu.apply_color_math_at(0x0010, 0x20, 0), 0x001f);
+        assert_eq!(ppu.apply_color_math_at(0x0010, 0x20, 0, [0; 4]), 0x001f);
 
         ppu.cgadsub = 0xa0;
-        assert_eq!(ppu.apply_color_math_at(0x0010, 0x20, 0), 0);
+        assert_eq!(ppu.apply_color_math_at(0x0010, 0x20, 0, [0; 4]), 0);
     }
 
     fn opaque_bg1_row(color: u16) -> Ppu {
@@ -1958,7 +2131,7 @@ mod tests {
         ppu.fixed_color = 0x000f;
         ppu.cgadsub = 0x01; // Add fixed color to BG1.
         ppu.cgwsel = 0x20; // Make the color window's inside region transparent to math.
-        ppu.wobjsel = 0x10; // Enable color window 1.
+        ppu.wobjsel = 0x20; // Enable color window 1.
         ppu.wh = [2, 3, 0, 0];
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
@@ -1983,7 +2156,7 @@ mod tests {
     fn main_color_window_blacks_the_selected_region() {
         let mut ppu = opaque_bg1_row(0x001f);
         ppu.cgwsel = 0x40; // Black the outside of the color window.
-        ppu.wobjsel = 0x10;
+        ppu.wobjsel = 0x20;
         ppu.wh = [2, 3, 0, 0];
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];

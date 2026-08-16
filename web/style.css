@@ -26,8 +26,12 @@ canvas { display: block; width: min(768px, 100%); height: auto; aspect-ratio: 25
 .dpad button { padding: 0; }
 .center-controls { grid-area: center; display: flex; flex-direction: column; align-items: center; gap: .8rem; }
 .menu-buttons, .shoulder-buttons, .face-buttons { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
-.face-buttons { grid-area: face; justify-content: end; justify-self: end; }
+.face-buttons { grid-area: face; display: grid; grid-template: repeat(3, 2.8rem) / repeat(3, 2.8rem); gap: .25rem; justify-self: end; }
 .face-buttons button { width: 2.8rem; height: 2.8rem; padding: 0; border-radius: 50%; }
+.face-buttons button[data-button="x"] { grid-area: 1 / 2; }
+.face-buttons button[data-button="y"] { grid-area: 2 / 1; }
+.face-buttons button[data-button="a"] { grid-area: 2 / 3; }
+.face-buttons button[data-button="b"] { grid-area: 3 / 2; }
 .hint { text-align: center; }
 @media (max-width: 560px) {
   .toolbar > div { flex-basis: 100%; }
