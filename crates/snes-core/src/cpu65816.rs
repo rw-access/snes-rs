@@ -147,10 +147,15 @@ impl Cpu65816 {
         self.state.status &= !0x08;
         self.state.program_bank = 0;
         self.state.waiting = false;
-        let vector = match kind {
-            InterruptKind::Nmi => 0xfffa,
-            InterruptKind::Irq => 0xfffe,
-            InterruptKind::Cop => 0xfff4,
+        let vector = match (kind, self.state.emulation_mode) {
+            // Native-mode interrupt vectors live in the upper half of the
+            // vector table; emulation mode uses the legacy 6502 locations.
+            (InterruptKind::Nmi, false) => 0xffea,
+            (InterruptKind::Irq, false) => 0xffee,
+            (InterruptKind::Cop, false) => 0xffe4,
+            (InterruptKind::Nmi, true) => 0xfffa,
+            (InterruptKind::Irq, true) => 0xfffe,
+            (InterruptKind::Cop, true) => 0xfff4,
         };
         let lo = self.read(
             bus,
@@ -3207,6 +3212,31 @@ mod tests {
         assert_ne!(cpu.state().status & FLAG_IRQ_DISABLE, 0);
         assert_eq!(bus.memory[0x01ff], 0x12);
         assert_eq!(bus.memory[0x01fe], 0x34);
+    }
+
+    #[test]
+    fn native_interrupt_entry_uses_native_vectors() {
+        let mut bus = FlatBus::new();
+        bus.memory[0xffea] = 0x78;
+        bus.memory[0xffeb] = 0x56;
+        let mut cpu = Cpu65816::default();
+        cpu.state = CpuState {
+            pc: 0x1234,
+            program_bank: 0x09,
+            sp: 0x01ff,
+            status: 0,
+            emulation_mode: false,
+            ..CpuState::default()
+        };
+
+        cpu.service_interrupt(&mut bus, InterruptKind::Nmi, None);
+
+        assert_eq!(cpu.state().pc, 0x5678);
+        assert_eq!(cpu.state().program_bank, 0);
+        assert_eq!(bus.memory[0x01ff], 0x09);
+        assert_eq!(bus.memory[0x01fe], 0x12);
+        assert_eq!(bus.memory[0x01fd], 0x34);
+        assert_eq!(bus.memory[0x01fc], 0);
     }
 
     #[test]

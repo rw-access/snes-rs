@@ -7,6 +7,7 @@ use crate::{
     controller::{ControllerPort, ControllerPorts},
     cpu65816::{Cpu65816, CpuBus, CpuState, CpuStep, InterruptKind},
     dma::Dma,
+    instructions::InstructionId,
     ppu::{Ppu, SCREEN_HEIGHT, SCREEN_WIDTH},
     video::FrameOutput,
 };
@@ -99,6 +100,14 @@ impl Console {
             apu: &mut self.apu,
             timing: &mut self.timing,
         };
+        if pending.is_none() && self.cpu.state().waiting {
+            return self.finish_cpu_step(CpuStep {
+                instruction: InstructionId::Wai,
+                cycles: 1,
+                master_ticks: 6,
+                access_count: 0,
+            });
+        }
         let step = match pending {
             Some(InterruptKind::Nmi) => {
                 self.cpu
@@ -130,6 +139,14 @@ impl Console {
             apu: &mut self.apu,
             timing: &mut self.timing,
         };
+        if pending.is_none() && self.cpu.state().waiting {
+            return self.finish_cpu_step(CpuStep {
+                instruction: InstructionId::Wai,
+                cycles: 1,
+                master_ticks: 6,
+                access_count: 0,
+            });
+        }
         let step = match pending {
             Some(InterruptKind::Nmi) => {
                 self.cpu
@@ -179,10 +196,12 @@ impl Console {
     }
 
     fn finish_cpu_step(&mut self, step: CpuStep) -> CpuStep {
+        let before = self.timing.master_ticks;
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
-        self.apu.step_spc700();
         self.run_pending_dma();
         self.run_hdma_boundaries();
+        self.apu
+            .run_for_master_ticks(self.timing.master_ticks.saturating_sub(before));
         step
     }
 
@@ -283,6 +302,9 @@ impl Console {
 
     fn update_vblank_and_v_timer(&mut self, scanline: u16) {
         if scanline == VBLANK_START_SCANLINE {
+            if self.timing.nmitimen & 0x01 != 0 {
+                self.controller.latch_auto_read();
+            }
             self.timing.rdnmi = true;
             if self.timing.nmitimen & 0x80 != 0 {
                 self.timing.pending_nmi = true;
@@ -317,6 +339,16 @@ impl Console {
         self.run_for_master_ticks(frames.saturating_mul(MASTER_TICKS_PER_FRAME));
     }
 
+    /// Sets the button report presented by one standard controller on the
+    /// next controller latch. Frontends and movie replayers use this at frame
+    /// boundaries before advancing the machine.
+    pub fn set_controller_buttons(&mut self, port: ControllerPort, buttons: u16) {
+        match port {
+            ControllerPort::Port1 => self.controller.port1.set_buttons(buttons),
+            ControllerPort::Port2 => self.controller.port2.set_buttons(buttons),
+        }
+    }
+
     /// Produces the next video frame.
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
         let (width, height) = self.ppu.native_dimensions();
@@ -342,6 +374,9 @@ impl Console {
         }
         if let Some(port) = apu_port(raw) {
             return self.apu.read_cpu_port(port);
+        }
+        if let Some(register) = controller_auto_register(raw) {
+            return self.controller.read_auto_register(register);
         }
         0
     }
@@ -416,6 +451,9 @@ impl CpuBus for ConsoleBus<'_> {
         if let Some(port) = controller_port(raw) {
             return self.controller.read_port(port, 0);
         }
+        if let Some(register) = controller_auto_register(raw) {
+            return self.controller.read_auto_register(register);
+        }
         if let Some(port) = apu_port(raw) {
             return self.apu.read_cpu_port(port);
         }
@@ -475,6 +513,11 @@ fn controller_port(address: u32) -> Option<ControllerPort> {
         0x4017 => Some(ControllerPort::Port2),
         _ => None,
     }
+}
+
+fn controller_auto_register(address: u32) -> Option<u16> {
+    let offset = address & 0xffff;
+    (is_system_bank(address) && (0x4218..=0x421b).contains(&offset)).then_some(offset as u16)
 }
 
 fn dma_register(address: u32) -> Option<u16> {
@@ -737,6 +780,19 @@ mod tests {
         console.apu.write_spc_io(0xf4, 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x002140)), 0xa5);
         assert_eq!(console.read_memory(Address24::new(0x802140)), 0xa5);
+    }
+
+    #[test]
+    fn read_memory_exposes_latched_auto_controller_registers() {
+        let mut console = Console::new(RomImage::new(vec![0xea; 8])).unwrap();
+        console.set_controller_buttons(ControllerPort::Port1, 0x0123);
+        console.set_controller_buttons(ControllerPort::Port2, 0x0456);
+        console.controller.latch_auto_read();
+
+        assert_eq!(console.read_memory(Address24::new(0x004218)), 0x23);
+        assert_eq!(console.read_memory(Address24::new(0x804219)), 0x01);
+        assert_eq!(console.read_memory(Address24::new(0x00421a)), 0x56);
+        assert_eq!(console.read_memory(Address24::new(0x80421b)), 0x04);
     }
 
     #[test]

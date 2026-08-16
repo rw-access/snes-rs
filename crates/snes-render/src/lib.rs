@@ -2,7 +2,9 @@
 
 pub mod acceptance;
 pub mod conformance;
+pub mod export;
 pub mod headless;
+pub mod lsmv;
 pub mod visual;
 
 pub use acceptance::{
@@ -17,4 +19,5 @@ pub use headless::{
     HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus, RomRunResult,
     RomTestDescriptor,
 };
+pub use lsmv::{FrameRate, LsmvError, LsmvFrame, LsmvMovie};
 pub use visual::{compare_frame, compare_frame_masked, pixel_within_tolerance, PixelMismatch};

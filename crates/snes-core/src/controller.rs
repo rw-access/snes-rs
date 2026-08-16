@@ -119,6 +119,7 @@ impl ControllerState {
 pub struct ControllerPorts {
     pub port1: ControllerState,
     pub port2: ControllerState,
+    auto_read: [u16; 2],
 }
 
 impl Default for ControllerPorts {
@@ -126,6 +127,7 @@ impl Default for ControllerPorts {
         Self {
             port1: ControllerState::default(),
             port2: ControllerState::default(),
+            auto_read: [0; 2],
         }
     }
 }
@@ -158,6 +160,23 @@ impl ControllerPorts {
 
     pub fn read_port2(&mut self, open_bus: u8) -> u8 {
         self.read_port(ControllerPort::Port2, open_bus)
+    }
+
+    /// Captures the two standard-controller reports exposed by the SNES
+    /// auto-joypad read registers during vblank.
+    pub fn latch_auto_read(&mut self) {
+        self.auto_read = [self.port1.report(), self.port2.report()];
+    }
+
+    /// Reads one byte of the auto-joypad register block ($4218-$421b).
+    pub fn read_auto_register(&self, address: u16) -> u8 {
+        match address {
+            0x4218 => self.auto_read[0] as u8,
+            0x4219 => (self.auto_read[0] >> 8) as u8,
+            0x421a => self.auto_read[1] as u8,
+            0x421b => (self.auto_read[1] >> 8) as u8,
+            _ => 0,
+        }
     }
 }
 
@@ -251,5 +270,18 @@ mod tests {
             assert_eq!(controller.read_serial(), 0);
         }
         assert_eq!(controller.read_serial(), 1);
+    }
+
+    #[test]
+    fn auto_read_registers_capture_both_controller_reports() {
+        let mut ports = ControllerPorts::default();
+        ports.port1.set_buttons(0x0123);
+        ports.port2.set_buttons(0x0456);
+        ports.latch_auto_read();
+
+        assert_eq!(ports.read_auto_register(0x4218), 0x23);
+        assert_eq!(ports.read_auto_register(0x4219), 0x01);
+        assert_eq!(ports.read_auto_register(0x421a), 0x56);
+        assert_eq!(ports.read_auto_register(0x421b), 0x04);
     }
 }

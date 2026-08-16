@@ -18,6 +18,10 @@ pub struct Apu {
     timer_stage2: [u8; 3],
     timer_outputs: [u8; 3],
     timer_stage1_cycles: [u16; 3],
+    /// Accumulated S-SMP master-clock budget. The S-SMP runs independently
+    /// from the S-CPU, so console scheduling feeds it elapsed master clocks
+    /// instead of assuming one SPC700 instruction per 65816 instruction.
+    spc_master_credit: i64,
     dsp_voices: [DspVoice; 8],
     dsp_kon_seen: u8,
     dsp_kof_seen: u8,
@@ -112,6 +116,7 @@ impl Default for Apu {
             timer_stage2: [0; 3],
             timer_outputs: [0; 3],
             timer_stage1_cycles: [0; 3],
+            spc_master_credit: 0,
             dsp_voices: [DspVoice::default(); 8],
             dsp_kon_seen: 0,
             dsp_kof_seen: 0,
@@ -518,6 +523,28 @@ impl Apu {
         cycles
     }
 
+    /// Advances the S-SMP by elapsed SNES master clocks.
+    ///
+    /// SPC700 instruction boundaries are discrete, so a small negative
+    /// credit is allowed when the next instruction crosses the requested
+    /// boundary. The credit is paid back before another instruction starts.
+    pub fn run_for_master_ticks(&mut self, master_ticks: u64) {
+        self.spc_master_credit = self
+            .spc_master_credit
+            .saturating_add(master_ticks.min(i64::MAX as u64) as i64);
+        while self.spc_master_credit >= 21 {
+            let cycles = self.step_spc700();
+            if cycles == 0 {
+                break;
+            }
+            // The NTSC S-SMP clock is approximately 1.024 MHz while the
+            // master clock is approximately 21.477 MHz.  The integer ratio
+            // is deliberately kept in this bounded core's clock domain;
+            // the fractional remainder is retained in `spc_master_credit`.
+            self.spc_master_credit -= i64::from(cycles) * 21;
+        }
+    }
+
     fn stage_spc_io(&mut self) {
         self.ram[0x00f0] = 0;
         self.ram[0x00f1] = 0;
@@ -550,39 +577,83 @@ impl Apu {
         // staged $F4-$F7 bytes are CPU input, so copying them back into the
         // CPU-visible output ports would erase a just-written CPU value when
         // the IPL echoes its handshake byte.
-        if let Some(address @ 0xf4..=0xf7) = direct_io_write {
-            self.write_spc_io(address, self.ram[usize::from(address)]);
+        for address in 0xf4..=0xf7 {
+            let index = usize::from(address - 0xf4);
+            if self.ram[usize::from(address)] != self.cpu_ports[index]
+                || direct_io_write == Some(address)
+            {
+                self.write_spc_io(address, self.ram[usize::from(address)]);
+            }
         }
     }
 
     fn direct_io_write_address(&self, pc: u16, opcode: u8) -> Option<u8> {
         let operand = |offset: u16| self.ram[usize::from(pc.wrapping_add(offset))];
-        let direct = |value: u8| self.spc700.direct_address(value) as u8;
+        let absolute =
+            |offset: u16| u16::from_le_bytes([operand(offset), operand(offset.wrapping_add(1))]);
+        let io = |address: u16| {
+            (0x00f1..=0x00f7)
+                .contains(&address)
+                .then_some(address as u8)
+                .or_else(|| {
+                    (0x00fa..=0x00fc)
+                        .contains(&address)
+                        .then_some(address as u8)
+                })
+        };
         match opcode {
-            0x8f => Some(direct(operand(2))), // MOV d,#i
-            0xc4 => Some(direct(operand(1))), // MOV d,A
-            0xd4 => Some(direct(operand(1).wrapping_add(self.spc700.x))),
-            0xc6 => Some(direct(self.spc700.x)),
-            0xd8 => Some(direct(operand(1))),
-            0xcb => Some(direct(operand(1))),
-            0xfa => Some(direct(operand(2))), // MOV dd,ds
-            0x18 | 0x29 | 0x49 | 0x98 | 0xa9 => Some(direct(operand(2))),
+            0x8f => io(self.spc700.direct_address(operand(2))), // MOV d,#i
+            0xc4 => io(self.spc700.direct_address(operand(1))), // MOV d,A
+            0xd4 => io(self
+                .spc700
+                .direct_address(operand(1).wrapping_add(self.spc700.x))),
+            0xc6 => io(self.spc700.direct_address(self.spc700.x)),
+            0xc7 => {
+                let base = operand(1).wrapping_add(self.spc700.x);
+                let pointer = self.spc700.direct_address(base);
+                let low = self.ram[usize::from(pointer)];
+                let high = self.ram[usize::from(self.spc700.direct_address(base.wrapping_add(1)))];
+                io(u16::from_le_bytes([low, high]))
+            }
+            // The IPL uses D7 for its RAM upload protocol.  Once IPL is
+            // disabled, the same instruction must also be able to reach the
+            // SPC-to-CPU port latches through an indirect destination.
+            0xd7 if self.control & 0x80 == 0 => {
+                let base = operand(1);
+                let pointer = self.spc700.direct_address(base);
+                let low = self.ram[usize::from(pointer)];
+                let high = self.ram[usize::from(self.spc700.direct_address(base.wrapping_add(1)))];
+                io(u16::from_le_bytes([low, high]).wrapping_add(u16::from(self.spc700.y)))
+            }
+            0xd8 => io(self.spc700.direct_address(operand(1))),
+            0xcb => io(self.spc700.direct_address(operand(1))),
+            0xfa => io(self.spc700.direct_address(operand(2))), // MOV dd,ds
+            0x18 | 0x29 | 0x49 | 0x98 | 0xa9 => io(self.spc700.direct_address(operand(2))),
+            0xc5 | 0xc9 | 0xcc => io(absolute(1)), // MOV !a/dest, A/X/Y
+            0xd5 => io(absolute(1).wrapping_add(u16::from(self.spc700.x))),
+            0xd6 => io(absolute(1).wrapping_add(u16::from(self.spc700.y))),
             _ => None,
         }
     }
 
     fn direct_io_read_address(&self, pc: u16, opcode: u8) -> Option<u8> {
         let operand = |offset: u16| self.ram[usize::from(pc.wrapping_add(offset))];
-        let direct = |value: u8| self.spc700.direct_address(value) as u8;
+        let io = |address: u16| {
+            (0x00fd..=0x00ff)
+                .contains(&address)
+                .then_some(address as u8)
+        };
         match opcode {
             0x04 | 0x24 | 0x44 | 0x64 | 0x84 | 0xa4 | 0xe4 | 0xf8 | 0xeb => {
-                Some(direct(operand(1)))
+                io(self.spc700.direct_address(operand(1)))
             }
-            0x14 | 0x34 | 0x54 | 0x74 | 0x94 | 0xb4 | 0xf4 | 0xfb => {
-                Some(direct(operand(1).wrapping_add(self.spc700.x)))
+            0x14 | 0x34 | 0x54 | 0x74 | 0x94 | 0xb4 | 0xf4 | 0xfb => io(self
+                .spc700
+                .direct_address(operand(1).wrapping_add(self.spc700.x))),
+            0x06 | 0x26 | 0x46 | 0x66 | 0x86 | 0xa6 | 0xe6 => {
+                io(self.spc700.direct_address(self.spc700.x))
             }
-            0x06 | 0x26 | 0x46 | 0x66 | 0x86 | 0xa6 | 0xe6 => Some(direct(self.spc700.x)),
-            0xba => Some(direct(operand(1))),
+            0xba => io(self.spc700.direct_address(operand(1))),
             _ => None,
         }
     }
@@ -954,9 +1025,8 @@ impl Spc700 {
                 2
             }
             0x2f => {
-                self.pc = self
-                    .pc
-                    .wrapping_add_signed(i16::from(self.fetch(ram) as i8));
+                let offset = self.fetch(ram) as i8;
+                self.pc = self.pc.wrapping_add_signed(i16::from(offset));
                 4
             }
             0xf0 | 0xd0 => {
@@ -1137,6 +1207,12 @@ impl Spc700 {
                 self.apply_alu_to_memory(ram, destination, value, Self::alu_op(opcode));
                 5
             }
+            0x79 => {
+                let left = ram[usize::from(self.direct_address(self.x))];
+                let right = ram[usize::from(self.direct_address(self.y))];
+                self.compare(left, right);
+                3
+            }
             0x09 | 0x29 | 0x49 | 0x69 | 0x89 | 0xa9 => {
                 let source = self.fetch_direct_address(ram);
                 let destination = self.fetch_direct_address(ram);
@@ -1144,7 +1220,7 @@ impl Spc700 {
                 self.apply_alu_to_memory(ram, destination, value, Self::alu_op(opcode));
                 6
             }
-            0x19 | 0x39 | 0x59 | 0x79 | 0x99 | 0xb9 => {
+            0x19 | 0x39 | 0x59 | 0x99 | 0xb9 => {
                 let source = self.direct_address(self.y);
                 let destination = self.direct_address(self.x);
                 let value = ram[usize::from(source)];
@@ -1628,7 +1704,7 @@ impl Spc700 {
             0x45 | 0x55 | 0x56 | 0x48 | 0x44 | 0x54 | 0x46 | 0x47 | 0x57 | 0x49 | 0x58 | 0x59 => {
                 AluOp::Eor
             }
-            0x65 | 0x75 | 0x76 | 0x68 | 0x64 | 0x74 | 0x66 | 0x67 | 0x77 | 0x69 | 0x78 | 0x79 => {
+            0x65 | 0x75 | 0x76 | 0x68 | 0x64 | 0x74 | 0x66 | 0x67 | 0x77 | 0x69 | 0x78 => {
                 AluOp::Compare
             }
             0x85 | 0x95 | 0x96 | 0x88 | 0x84 | 0x94 | 0x86 | 0x87 | 0x97 | 0x89 | 0x98 | 0x99 => {
@@ -1993,6 +2069,29 @@ mod tests {
     }
 
     #[test]
+    fn indirect_spc_port_writes_reach_the_cpu_latch() {
+        let mut apu = Apu::default();
+        apu.ram[0x20..0x22].copy_from_slice(&[0xf4, 0x00]);
+        apu.ram[..3].copy_from_slice(&[0xe8, 0x5a, 0xd7]);
+        apu.ram[3] = 0x20; // MOV [$20]+Y,A
+
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.step_spc700(), 7);
+        assert_eq!(apu.read_cpu_port(0), 0x5a);
+    }
+
+    #[test]
+    fn absolute_spc_port_writes_are_observed_even_when_values_match_cpu_input() {
+        let mut apu = Apu::default();
+        apu.write_cpu_port(0, 0x5a);
+        apu.ram[..5].copy_from_slice(&[0xe8, 0x5a, 0xc5, 0xf4, 0x00]);
+
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.step_spc700(), 5);
+        assert_eq!(apu.read_cpu_port(0), 0x5a);
+    }
+
+    #[test]
     fn spc700_executes_basic_register_and_memory_operations() {
         let mut apu = Apu::default();
         apu.ram[..6].copy_from_slice(&[0xe8, 0x5a, 0xc4, 0x10, 0xff, 0x00]);
@@ -2079,6 +2178,15 @@ mod tests {
         apu.ram[..2].copy_from_slice(&[0xd0, 0x02]);
         assert_eq!(apu.step_spc700(), 2);
         assert_eq!(apu.spc700.pc, 0x0002);
+    }
+
+    #[test]
+    fn spc700_bra_applies_displacement_after_fetching_it() {
+        let mut apu = Apu::default();
+        apu.ram[..4].copy_from_slice(&[0x2f, 0x02, 0x00, 0x00]);
+
+        assert_eq!(apu.step_spc700(), 4);
+        assert_eq!(apu.spc700.pc, 4);
     }
 
     #[test]
@@ -2283,6 +2391,25 @@ mod tests {
         // The eighth instruction is ADC: $0e + $01 + carry = $10.
         assert_eq!(apu.ram[0x40], 0x10);
         assert_eq!(apu.ram[0x20], 0x00);
+    }
+
+    #[test]
+    fn spc700_xy_memory_compare_and_adc_use_indexed_direct_addresses() {
+        let mut apu = Apu::default();
+        apu.spc700.x = 0x20;
+        apu.spc700.y = 0x30;
+        apu.ram[0x20] = 0xa5;
+        apu.ram[0x30] = 0xa5;
+        apu.ram[0] = 0x79;
+
+        assert_eq!(apu.step_spc700(), 3); // CMP (X),(Y)
+        assert_ne!(apu.spc700.psw & 0x02, 0);
+        apu.ram[0x30] = 0x5a;
+        apu.ram[0x20] = 0x01;
+        apu.spc700.psw |= 0x01;
+        apu.ram[1] = 0x99;
+        assert_eq!(apu.step_spc700(), 5); // ADC (X),(Y)
+        assert_eq!(apu.ram[0x20], 0x5c);
     }
 
     #[test]
@@ -2549,6 +2676,19 @@ mod tests {
         assert_eq!(apu.step_spc700(), 2); // MOV X,#$EF
         assert_eq!(apu.spc700.x, 0xef);
         assert_eq!(apu.spc700.pc, 0xffc2);
+    }
+
+    #[test]
+    fn master_clock_scheduler_accumulates_partial_spc700_instruction_time() {
+        let mut apu = Apu::default();
+        apu.ram[0] = 0x00; // NOP, two SPC cycles = 42 master clocks here.
+
+        apu.run_for_master_ticks(20);
+        assert_eq!(apu.spc700.pc, 0);
+        apu.run_for_master_ticks(1);
+        assert_eq!(apu.spc700.pc, 1);
+        apu.run_for_master_ticks(42);
+        assert_eq!(apu.spc700.pc, 2);
     }
 
     #[test]

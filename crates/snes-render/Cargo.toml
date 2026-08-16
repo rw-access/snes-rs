@@ -10,7 +10,12 @@ rust-version.workspace = true
 snes-core = { path = "../snes-core" }
 jpeg-decoder = { version = "0.3.2", default-features = false }
 png = { version = "0.17.16", default-features = false }
+zip = { version = "2.2.0", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "snes-test"
 path = "src/bin/snes-test.rs"
+
+[[bin]]
+name = "lsmv_to_mp4"
+path = "src/bin/lsmv_to_mp4.rs"

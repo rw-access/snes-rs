@@ -72,6 +72,22 @@ Run the integrated CLI frontend and capture a frame:
 cargo run -p snes-play -- path/to/game.sfc --frames 1 --ppm frame.ppm
 ```
 
+Replay an lsnes SNES movie (`.lsmv`) into an MP4. The movie contains one
+controller sample per frame; the exporter also writes the emulator's stereo
+audio into the MP4. Use `--sample-dir` to retain PPM frames for visual review
+and `--audio-wav` to retain the generated PCM audio for inspection:
+
+```sh
+cargo run -p snes-render --bin lsmv_to_mp4 -- \
+  path/to/movie.lsmv path/to/game.sfc \
+  --output movie.mp4 --sample-dir movie-samples --sample-every 600 \
+  --audio-wav movie.wav
+```
+
+The exporter verifies the LSMV's recorded ROM SHA-256 by default. Use
+`--ignore-rom-checksum` only when exercising the movie plumbing against a
+different test ROM.
+
 Run the opt-in 65816 vector harness against a materialized SingleStepTests
 file:
 
