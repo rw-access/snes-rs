@@ -138,23 +138,38 @@ pub trait CartridgeDevice {
     fn read(&mut self, address: Address24) -> u8;
     fn write(&mut self, address: Address24, value: u8);
     fn access_speed(&self, address: Address24) -> AccessSpeed;
+
+    fn save_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn restore_state(&mut self, _state: &[u8]) -> bool {
+        true
+    }
 }
 
 /// Placeholder cartridge device used until the LoROM/HiROM loader lands.
 #[derive(Debug)]
 pub(crate) struct RomOnlyCartridge {
     rom: RomImage,
+    sram: Vec<u8>,
 }
 
 impl RomOnlyCartridge {
     pub(crate) fn new(rom: RomImage) -> Self {
-        Self { rom }
+        Self {
+            sram: vec![0; rom.metadata().sram_size],
+            rom,
+        }
     }
 }
 
 impl CartridgeDevice for RomOnlyCartridge {
     fn read(&mut self, address: Address24) -> u8 {
         let raw = address.get() as usize;
+        if let Some(index) = self.sram_index(raw) {
+            return self.sram[index];
+        }
         let index = match self.rom.metadata().mapping {
             MappingMode::LoRom => ((raw & 0x7f_0000) >> 1) | (raw & 0x7fff),
             MappingMode::HiRom => (raw & 0x3f_0000) | (raw & 0xffff),
@@ -162,10 +177,51 @@ impl CartridgeDevice for RomOnlyCartridge {
         self.rom.as_bytes()[index]
     }
 
-    fn write(&mut self, _address: Address24, _value: u8) {}
+    fn write(&mut self, address: Address24, value: u8) {
+        if let Some(index) = self.sram_index(address.get() as usize) {
+            self.sram[index] = value;
+        }
+    }
 
     fn access_speed(&self, _address: Address24) -> AccessSpeed {
         AccessSpeed::Fast
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        self.sram.clone()
+    }
+
+    fn restore_state(&mut self, state: &[u8]) -> bool {
+        if state.len() != self.sram.len() {
+            return false;
+        }
+        self.sram.copy_from_slice(state);
+        true
+    }
+}
+
+impl RomOnlyCartridge {
+    fn sram_index(&self, raw: usize) -> Option<usize> {
+        if self.sram.is_empty() {
+            return None;
+        }
+        let bank = raw >> 16;
+        let offset = raw & 0xffff;
+        let byte = match self.rom.metadata().mapping {
+            MappingMode::LoRom
+                if (0x70..=0x7d).contains(&bank) || (0xf0..=0xff).contains(&bank) => {
+                (bank.saturating_sub(0x70)) * 0x8000 + offset
+            }
+            MappingMode::HiRom
+                if (0x20..=0x3f).contains(&bank) || (0xa0..=0xbf).contains(&bank) => {
+                if !(0x6000..=0x7fff).contains(&offset) {
+                    return None;
+                }
+                (bank & 0x1f) * 0x2000 + (offset - 0x6000)
+            }
+            _ => return None,
+        };
+        Some(byte % self.sram.len())
     }
 }
 
@@ -206,5 +262,22 @@ mod tests {
         assert_eq!(image.metadata().mapping, MappingMode::HiRom);
         let mut cartridge = RomOnlyCartridge::new(image);
         assert_eq!(cartridge.read(Address24::new(0xc00000)), 0x42);
+    }
+
+    #[test]
+    fn lorom_sram_window_is_writable_and_snapshottable() {
+        let mut rom = vec![0; 0x8000];
+        rom[0x7fc0..0x7fd5].fill(b' ');
+        rom[0x7fd5] = 0x20;
+        rom[0x7fd7] = 0x08;
+        rom[0x7fd8] = 0x05;
+        let image = RomImage::load(rom).unwrap();
+        let mut cartridge = RomOnlyCartridge::new(image);
+        cartridge.write(Address24::new(0x700123), 0x5a);
+        assert_eq!(cartridge.read(Address24::new(0x700123)), 0x5a);
+        let state = cartridge.save_state();
+        cartridge.write(Address24::new(0x700123), 0);
+        assert!(cartridge.restore_state(&state));
+        assert_eq!(cartridge.read(Address24::new(0x700123)), 0x5a);
     }
 }

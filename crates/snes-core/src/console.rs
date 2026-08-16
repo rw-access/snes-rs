@@ -166,6 +166,7 @@ impl Console {
             rom_identity: self.rom_identity,
             cpu: self.cpu.snapshot(),
             wram: self.wram.clone(),
+            cartridge: self.cartridge.save_state(),
             ppu: self.ppu.clone(),
             dma: self.dma,
             controller: self.controller,
@@ -182,6 +183,9 @@ impl Console {
         }
         if state.wram.len() != self.wram.len() {
             return Err(RestoreError::InvalidMemorySize);
+        }
+        if !self.cartridge.restore_state(&state.cartridge) {
+            return Err(RestoreError::InvalidCartridgeState);
         }
         self.cpu.restore(state.cpu);
         self.wram.copy_from_slice(&state.wram);
@@ -265,6 +269,7 @@ pub struct ConsoleState {
     pub rom_identity: u64,
     pub cpu: CpuState,
     pub wram: Vec<u8>,
+    pub cartridge: Vec<u8>,
     pub ppu: Ppu,
     pub dma: Dma,
     pub controller: ControllerState,
@@ -281,6 +286,7 @@ pub enum RestoreError {
     UnsupportedVersion(u16),
     RomMismatch,
     InvalidMemorySize,
+    InvalidCartridgeState,
 }
 
 #[cfg(test)]
