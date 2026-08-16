@@ -41,6 +41,18 @@ Run a bounded ROM smoke test:
 cargo run -p snes-render --bin snes-test -- path/to/game.sfc 1000000
 ```
 
+For a ROM with an explicitly documented memory-byte result, the runner can
+enforce the result and return a failing exit status for running or failed
+tests:
+
+```sh
+cargo run -p snes-render --bin snes-test -- path/to/test.sfc 1000000 \
+  --result-address 0x000000 --result-running 0 --result-passed 1
+```
+
+Use `--mapping lorom` or `--mapping hirom` when authoritative test metadata
+overrides automatic cartridge-header detection.
+
 Run the integrated CLI frontend and capture a frame:
 
 ```sh

@@ -53,11 +53,13 @@ The corpus gates are intentionally layered:
 The current execution limit is instruction/DMA-granular rather than a hard
 cutoff: a request for `N` master ticks may report a value greater than `N` after
 the final instruction or transfer. An acceptance descriptor records the bound,
-but a strict timing gate must still define the allowed overshoot. The legacy
-`snes-test` CLI prints bounded diagnostic output only; the opt-in
+but a strict timing gate must still define the allowed overshoot. The
+`snes-test` CLI remains diagnostic when no result protocol is supplied, and can
+enforce an explicit memory-byte result when one is documented. The opt-in
 `snes-acceptance` binary provides nonzero results for strict case failures. The
-`RomTestDescriptor::mapping` field is applied by the headless runner when
-loading a ROM; leaving it unset preserves automatic file-header detection.
+`RomTestDescriptor::mapping` field and acceptance `mapping` descriptor are
+applied when loading a ROM; leaving them unset preserves automatic file-header
+detection.
 
 ## Visual acceptance contract
 

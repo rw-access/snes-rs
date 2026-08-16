@@ -90,6 +90,10 @@ unsupported reference format into a correctness claim. Artifacts are written
 under `target/snes-acceptance/<case>/` as lossless PPM plus metadata and, on a
 mismatch, a deterministic PPM diff.
 
+An optional `mapping = "lorom"` or `mapping = "hirom"` field overrides
+automatic cartridge-header detection for that case and is applied on both the
+initial run and deterministic replay.
+
 The harness decodes binary P6 PPM, little-endian ARGB32, PNG, and JPEG reference
 files. A strict case may therefore use a pinned PNG/JPEG capture, subject to
 the descriptor's dimensions, tolerance, mask, and optional reference

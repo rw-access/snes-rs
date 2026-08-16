@@ -11,10 +11,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use snes_core::{Address24, Console, FrameOutput};
+use snes_core::{Address24, Console, FrameOutput, MappingMode};
 
 use crate::{
-    headless::{HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus},
+    headless::{
+        HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus, RomTestDescriptor,
+    },
     visual::{compare_frame_masked, pixel_within_tolerance, PixelMismatch},
 };
 
@@ -48,6 +50,7 @@ pub struct AcceptanceCase {
     pub revision: String,
     pub rom_path: PathBuf,
     pub rom_sha256: String,
+    pub mapping: Option<MappingMode>,
     pub enabled: bool,
     pub diagnostic_only: bool,
     pub max_frames: Option<u64>,
@@ -313,7 +316,10 @@ impl AcceptanceRunner {
             });
         }
 
-        let runner = HeadlessRunner::default();
+        let runner = HeadlessRunner::new(RomTestDescriptor {
+            mapping: case.mapping,
+            ..RomTestDescriptor::default()
+        });
         let mut console = runner.load_path(&rom_path).map_err(|error| {
             AcceptanceError::InvalidCase(format!(
                 "{} could not load: {error:?}",
@@ -1045,6 +1051,7 @@ fn parse_case(
     let rom_path = parse_path(values.get("rom"), "rom")?;
     let rom_sha256 = parse_string(values.get("rom_sha256"), "rom_sha256")?;
     validate_hex(&rom_sha256, 64, "rom_sha256")?;
+    let mapping = parse_mapping(values.get("mapping"))?;
     let enabled = parse_bool(values.get("enabled"), "enabled")?.unwrap_or(false);
     let diagnostic_only =
         parse_bool(values.get("diagnostic_only"), "diagnostic_only")?.unwrap_or(false);
@@ -1091,6 +1098,7 @@ fn parse_case(
         revision,
         rom_path,
         rom_sha256,
+        mapping,
         enabled,
         diagnostic_only,
         max_frames,
@@ -1107,6 +1115,20 @@ fn parse_case(
         mask_path,
         artifact_name,
     })
+}
+
+fn parse_mapping(value: Option<&String>) -> Result<Option<MappingMode>, AcceptanceError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = parse_string(Some(value), "mapping")?;
+    match value.as_str() {
+        "lorom" => Ok(Some(MappingMode::LoRom)),
+        "hirom" => Ok(Some(MappingMode::HiRom)),
+        other => Err(AcceptanceError::Parse(format!(
+            "unsupported mapping {other:?}; supported mappings: lorom, hirom"
+        ))),
+    }
 }
 
 fn validate_case(case: &AcceptanceCase) -> Result<(), AcceptanceError> {
@@ -1452,6 +1474,7 @@ mod tests {
             revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             rom_path: PathBuf::from("test.sfc"),
             rom_sha256: sha256_hex(rom),
+            mapping: None,
             enabled: true,
             diagnostic_only: false,
             max_frames: Some(0),
@@ -1480,8 +1503,7 @@ mod tests {
 
     #[test]
     fn manifest_parser_keeps_explicit_case_metadata() {
-        let manifest = AcceptanceManifest::parse(
-            r#"
+        let text = r#"
 format_version = 1
 corpus_root = "materialized"
 artifact_root = "target/snes-acceptance"
@@ -1491,6 +1513,7 @@ source = "peterlemon-snes"
 revision = "0123456789abcdef0123456789abcdef01234567"
 rom = "CPU/CPUADC.sfc"
 rom_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+mapping = "hirom"
 enabled = false
 diagnostic_only = true
 max_frames = 1
@@ -1502,14 +1525,76 @@ height = 224
 channel_tolerance = 0
 mask = ""
 artifact = "cpuadc"
-"#,
-        )
-        .unwrap();
+"#;
+        let manifest = AcceptanceManifest::parse(text).unwrap();
         let case = manifest.case("cpuadc").unwrap();
         assert_eq!(case.source_id, "peterlemon-snes");
+        assert_eq!(case.mapping, Some(MappingMode::HiRom));
         assert_eq!(case.reference_format, ReferenceFormat::Png);
         assert!(case.diagnostic_only);
         assert!(case.mask_path.is_none());
+
+        let lorom_manifest = AcceptanceManifest::parse(&text.replace("hirom", "lorom")).unwrap();
+        assert_eq!(
+            lorom_manifest.case("cpuadc").unwrap().mapping,
+            Some(MappingMode::LoRom)
+        );
+
+        let default_manifest =
+            AcceptanceManifest::parse(&text.replace("mapping = \"hirom\"\n", "")).unwrap();
+        assert_eq!(default_manifest.case("cpuadc").unwrap().mapping, None);
+
+        let error = AcceptanceManifest::parse(&text.replace("hirom", "exhirom")).unwrap_err();
+        assert!(error.to_string().contains("unsupported mapping"));
+    }
+
+    #[test]
+    fn acceptance_execution_applies_mapping_override_and_replays_deterministically() {
+        let root =
+            std::env::temp_dir().join(format!("snes-acceptance-mapping-{}", std::process::id()));
+        let corpus = root.join("materialized/fixture");
+        fs::create_dir_all(&corpus).unwrap();
+
+        let mut rom = vec![0xea; 0x10000];
+        rom[0x7fc0..0x7fc0 + 21].copy_from_slice(b"SYNTHETIC ACCEPTANCE!");
+        rom[0x7fd5] = 0x20;
+        rom[0x7fd6] = 0;
+        rom[0x7fd7] = 7;
+        rom[0x7fd8] = 0;
+        rom[0x7fd9] = 0;
+        // The detected LoROM reset vector runs NOPs from offset zero.
+        rom[0x7ffc] = 0;
+        rom[0x7ffd] = 0x80;
+        // The acceptance mapping override makes the HiROM reset vector reach STP.
+        rom[0xfffc] = 0;
+        rom[0xfffd] = 0x80;
+        rom[0x8000] = 0xdb;
+        fs::write(corpus.join("test.sfc"), &rom).unwrap();
+
+        let mut case = synthetic_case(&rom, "unused.ppm");
+        case.diagnostic_only = true;
+        case.reference_path = None;
+        case.capture_frame = None;
+        case.max_frames = None;
+        case.max_master_ticks = Some(100);
+        case.mapping = Some(MappingMode::HiRom);
+        let manifest = AcceptanceManifest {
+            format_version: MANIFEST_VERSION,
+            corpus_root: PathBuf::from("materialized"),
+            artifact_root: PathBuf::from("artifacts"),
+            cases: vec![case.clone()],
+        };
+        let runner = AcceptanceRunner::new(manifest, &root);
+        let report = runner.run_case(&case).unwrap();
+        assert!(report.run.stopped);
+        assert_eq!(report.status, CaseStatus::Diagnostic);
+        assert!(report.message.is_none());
+
+        case.mapping = None;
+        let default_report = runner.run_case(&case).unwrap();
+        assert!(!default_report.run.stopped);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
