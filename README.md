@@ -19,6 +19,8 @@ paths), SPC700/APU I/O, and a bounded BRR/DSP mixer.
   frontends.
 - `crates/snes-wasm` and `web/` — browser frontend with WebAssembly video and
   audio, keyboard/touch controls, save states, and rewind.
+- `crates/snes-ffi` — opaque C ABI for native integrations, including stable
+  WRAM/framebuffer/audio views, snapshots, and rewind.
 - `docs/accuracy.md` — authoritative reference ledger.
 - `tests/` — local fixtures and the documented opt-in ROM corpus location.
 
@@ -92,6 +94,15 @@ python3 web/dev_server.py --port 8000
 
 Then open <http://localhost:8000/> and choose an `.sfc` or `.smc` ROM. See
 `web/README.md` for browser debugging details.
+
+Build the native C ABI for external integrations:
+
+```sh
+cargo build --release -p snes-ffi
+```
+
+The repository also includes `.github/workflows/pages.yml`, which builds and
+deploys the static browser frontend to GitHub Pages on pushes to `main`.
 
 Replay an lsnes SNES movie (`.lsmv`) into an MP4. The movie contains one
 controller sample per frame; the exporter also writes the emulator's stereo
