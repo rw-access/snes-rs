@@ -11,10 +11,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use snes_core::{Console, FrameOutput};
+use snes_core::{Address24, Console, FrameOutput};
 
 use crate::{
-    headless::HeadlessRunner,
+    headless::{HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus},
     visual::{compare_frame_masked, pixel_within_tolerance, PixelMismatch},
 };
 
@@ -59,6 +59,7 @@ pub struct AcceptanceCase {
     pub reference_path: Option<PathBuf>,
     pub reference_sha256: Option<String>,
     pub reference_format: ReferenceFormat,
+    pub result_protocol: Option<ResultProtocol>,
     pub width: u16,
     pub height: u16,
     pub channel_tolerance: u8,
@@ -88,6 +89,7 @@ pub struct CapturedFrame {
 pub struct AcceptanceRun {
     pub master_ticks: u64,
     pub stopped: bool,
+    pub result: Option<ResultObservation>,
     pub captured_frame: Option<CapturedFrame>,
 }
 
@@ -359,12 +361,46 @@ impl AcceptanceRunner {
             }
         }
 
+        if let Some(observation) = report.run.result {
+            match observation.status {
+                ResultStatus::Passed => {}
+                ResultStatus::Running => {
+                    report.status = if case.diagnostic_only {
+                        CaseStatus::Diagnostic
+                    } else {
+                        CaseStatus::Failed
+                    };
+                    report.message = Some(format!(
+                        "result protocol still running at ${:06x} (value {})",
+                        observation.address.get(),
+                        observation.value
+                    ));
+                    return Ok(report);
+                }
+                ResultStatus::Failed(value) => {
+                    report.status = if case.diagnostic_only {
+                        CaseStatus::Diagnostic
+                    } else {
+                        CaseStatus::Failed
+                    };
+                    report.message = Some(format!(
+                        "result protocol failed at ${:06x} with value {value:#04x}",
+                        observation.address.get()
+                    ));
+                    return Ok(report);
+                }
+            }
+        }
+
         if let Some(frame) = report.run.captured_frame.as_ref() {
             report.artifacts =
                 write_artifacts(&self.artifact_root, case, &report.run, frame, None, None)?;
         }
 
         let Some(reference_path) = case.reference_path.as_ref() else {
+            if case.result_protocol.is_some() {
+                return Ok(report);
+            }
             if !case.diagnostic_only {
                 report.status = CaseStatus::Failed;
                 report.message = Some("strict case has no reference frame".to_owned());
@@ -511,9 +547,14 @@ fn execute_case(
         };
         let master_ticks = console.master_ticks();
         let stopped = console.is_stopped();
+        let result = case
+            .result_protocol
+            .as_ref()
+            .map(|protocol| protocol.observe(console));
         return Ok(AcceptanceRun {
             master_ticks,
             stopped,
+            result,
             captured_frame: Some(CapturedFrame {
                 frame_number: target_frame,
                 master_ticks,
@@ -533,9 +574,14 @@ fn execute_case(
             ))
         }
     }
+    let result = case
+        .result_protocol
+        .as_ref()
+        .map(|protocol| protocol.observe(console));
     Ok(AcceptanceRun {
         master_ticks: console.master_ticks(),
         stopped: console.is_stopped(),
+        result,
         captured_frame: None,
     })
 }
@@ -1021,6 +1067,7 @@ fn parse_case(
             .map(|extension| ReferenceFormat::parse(extension))
             .unwrap_or(ReferenceFormat::Unsupported("none".to_owned())),
     };
+    let result_protocol = parse_result_protocol(values)?;
     let width = parse_optional_u64(values.get("width"), "width")?.unwrap_or(256);
     let height = parse_optional_u64(values.get("height"), "height")?.unwrap_or(224);
     let channel_tolerance =
@@ -1053,6 +1100,7 @@ fn parse_case(
         reference_path,
         reference_sha256,
         reference_format,
+        result_protocol,
         width: width as u16,
         height: height as u16,
         channel_tolerance: channel_tolerance as u8,
@@ -1081,7 +1129,54 @@ fn validate_case(case: &AcceptanceCase) -> Result<(), AcceptanceError> {
             case.id
         )));
     }
+    if !case.diagnostic_only && case.reference_path.is_none() && case.result_protocol.is_none() {
+        return Err(AcceptanceError::InvalidCase(format!(
+            "{} has neither a reference frame nor a result protocol",
+            case.id
+        )));
+    }
     validate_hex(&case.rom_sha256, 64, "rom_sha256")
+}
+
+fn parse_result_protocol(
+    values: &BTreeMap<String, String>,
+) -> Result<Option<ResultProtocol>, AcceptanceError> {
+    let Some(protocol) = values.get("result_protocol") else {
+        for key in ["result_address", "result_running", "result_passed"] {
+            if values.contains_key(key) {
+                return Err(AcceptanceError::Parse(format!(
+                    "{key} requires result_protocol"
+                )));
+            }
+        }
+        return Ok(None);
+    };
+    let protocol = parse_string(Some(protocol), "result_protocol")?;
+    match protocol.as_str() {
+        "memory-byte" => {
+            let address = parse_u64(values.get("result_address"), "result_address")?;
+            if address > u64::from(Address24::MAX.get()) {
+                return Err(AcceptanceError::InvalidCase(format!(
+                    "result_address {address:#x} exceeds the 24-bit bus"
+                )));
+            }
+            let running = parse_u64(values.get("result_running"), "result_running")?;
+            let passed = parse_u64(values.get("result_passed"), "result_passed")?;
+            if running > u64::from(u8::MAX) || passed > u64::from(u8::MAX) {
+                return Err(AcceptanceError::InvalidCase(
+                    "memory-byte result values must fit in one byte".to_owned(),
+                ));
+            }
+            Ok(Some(ResultProtocol::memory_byte(
+                Address24::new(address as u32),
+                running as u8,
+                passed as u8,
+            )))
+        }
+        other => Err(AcceptanceError::Parse(format!(
+            "unsupported result_protocol {other:?}; supported protocols: memory-byte"
+        ))),
+    }
 }
 
 fn read_required(path: &Path) -> Result<Vec<u8>, AcceptanceError> {
@@ -1186,10 +1281,15 @@ fn parse_u64(value: Option<&String>, key: &str) -> Result<u64, AcceptanceError> 
 fn parse_optional_u64(value: Option<&String>, key: &str) -> Result<Option<u64>, AcceptanceError> {
     value
         .map(|value| {
-            value
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| AcceptanceError::Parse(format!("{key} must be an unsigned integer")))
+            let value = value.trim();
+            let parsed = value
+                .strip_prefix("0x")
+                .or_else(|| value.strip_prefix("0X"))
+                .map_or_else(
+                    || value.parse::<u64>(),
+                    |digits| u64::from_str_radix(digits, 16),
+                );
+            parsed.map_err(|_| AcceptanceError::Parse(format!("{key} must be an unsigned integer")))
         })
         .transpose()
 }
@@ -1361,6 +1461,7 @@ mod tests {
             reference_path: Some(PathBuf::from(reference)),
             reference_sha256: None,
             reference_format: ReferenceFormat::Ppm,
+            result_protocol: None,
             width: 256,
             height: 224,
             channel_tolerance: 0,
@@ -1409,6 +1510,36 @@ artifact = "cpuadc"
         assert_eq!(case.reference_format, ReferenceFormat::Png);
         assert!(case.diagnostic_only);
         assert!(case.mask_path.is_none());
+    }
+
+    #[test]
+    fn manifest_parser_accepts_memory_result_protocol() {
+        let manifest = AcceptanceManifest::parse(
+            r#"
+format_version = 1
+corpus_root = "materialized"
+artifact_root = "target/snes-acceptance"
+
+[case.result]
+source = "higan-snes-test-roms"
+revision = "0123456789abcdef0123456789abcdef01234567"
+rom = "absindx/test.sfc"
+rom_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+enabled = false
+diagnostic_only = true
+max_master_ticks = 1000
+result_protocol = "memory-byte"
+result_address = 0x000000
+result_running = 0
+result_passed = 1
+artifact = "result"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.case("result").unwrap().result_protocol,
+            Some(ResultProtocol::memory_byte(Address24::new(0), 0, 1))
+        );
     }
 
     #[test]

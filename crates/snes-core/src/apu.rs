@@ -47,6 +47,8 @@ struct DspVoice {
     previous: i16,
     previous_previous: i16,
     envelope: u16,
+    /// 0 = attack, 1 = decay, 2 = sustain for the bounded ADSR model.
+    envelope_stage: u8,
 }
 
 impl Default for DspVoice {
@@ -63,6 +65,7 @@ impl Default for DspVoice {
             previous: 0,
             previous_previous: 0,
             envelope: 0,
+            envelope_stage: 0,
         }
     }
 }
@@ -384,16 +387,44 @@ impl Apu {
         if gain & 0x80 == 0 {
             state.envelope = u16::from(gain & 0x7f) << 8;
         } else {
-            // Bounded ADSR approximation: attack uses ADSR1's rate nibble,
-            // while sustain/decay are represented by a slow approach to the
-            // configured sustain level. Exact DSP rate tables are deferred.
-            let attack = u16::from((self.dsp[base + 5] & 0x0f).max(1));
-            let sustain = u16::from((self.dsp[base + 6] >> 5) & 0x07) * 0x1000;
-            state.envelope = state
-                .envelope
-                .saturating_add(attack * 0x0100)
-                .min(0x7fff)
-                .max(sustain);
+            // Bounded ADSR approximation.  The real S-DSP updates its
+            // envelope at a fixed internal rate using a non-linear table;
+            // this mixer advances one envelope step per requested sample.
+            // Preserve the important phase ordering: attack starts at zero,
+            // decay approaches the sustain level, and sustain does not jump
+            // the envelope upward on key-on.
+            let attack_rate = self.dsp[base + 5] & 0x0f;
+            let decay_rate = (self.dsp[base + 5] >> 4) & 0x07;
+            let sustain_level = u16::from((self.dsp[base + 6] >> 5) & 0x07) * 0x1000;
+            match state.envelope_stage {
+                0 => {
+                    let step = (u16::from(attack_rate) + 1) * 0x0100;
+                    state.envelope = state.envelope.saturating_add(step).min(0x7fff);
+                    if state.envelope == 0x7fff {
+                        state.envelope_stage = 1;
+                    }
+                }
+                1 => {
+                    let step = (u16::from(decay_rate) + 1) * 0x0080;
+                    if state.envelope > sustain_level {
+                        state.envelope = state.envelope.saturating_sub(step);
+                        if state.envelope <= sustain_level {
+                            state.envelope = sustain_level;
+                            state.envelope_stage = 2;
+                        }
+                    } else {
+                        state.envelope = sustain_level;
+                        state.envelope_stage = 2;
+                    }
+                }
+                _ => {
+                    // A zero sustain-rate nibble is held.  Non-zero rates
+                    // decay slowly, which keeps long-lived voices bounded
+                    // without pretending to reproduce the exact rate table.
+                    let sustain_rate = self.dsp[base + 6] & 0x1f;
+                    state.envelope = state.envelope.saturating_sub(u16::from(sustain_rate));
+                }
+            }
         }
         state.envelope
     }
@@ -871,8 +902,8 @@ impl Spc700 {
                 2
             }
             0xbd => {
-                self.y = self.x;
-                self.set_zero_negative(self.y);
+                // MOV SP,X is a flag-preserving stack-pointer transfer.
+                self.sp = self.x;
                 2
             }
             0xbc => {
@@ -2034,6 +2065,20 @@ mod tests {
     }
 
     #[test]
+    fn spc700_mov_sp_x_writes_stack_pointer_without_touching_flags() {
+        let mut apu = Apu::default();
+        apu.spc700.x = 0x42;
+        apu.spc700.sp = 0xa5;
+        apu.spc700.psw = 0xd3;
+        apu.ram[0] = 0xbd; // MOV SP,X
+
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.spc700.sp, 0x42);
+        assert_eq!(apu.spc700.x, 0x42);
+        assert_eq!(apu.spc700.psw, 0xd3);
+    }
+
+    #[test]
     fn spc700_indirect_pointer_forms_read_and_write_through_direct_page() {
         let mut apu = Apu::default();
         apu.ram[0x10] = 0x00;
@@ -2438,5 +2483,39 @@ mod tests {
         assert_ne!(samples[0], AudioSample::default());
         assert_eq!(samples[16], AudioSample::default());
         assert_eq!(apu.dsp[0x7c] & 0x01, 0x01);
+    }
+
+    #[test]
+    fn dsp_adsr_progresses_attack_decay_and_sustain_without_a_key_on_jump() {
+        let mut apu = Apu::default();
+        apu.dsp[0x05] = 0x7f; // decay rate 7, attack rate 15
+        apu.dsp[0x06] = 0x40; // sustain level 2, sustain rate 0
+        apu.dsp[0x07] = 0x80; // ADSR mode
+        apu.dsp_voices[0].active = true;
+
+        let first = apu.step_voice_envelope(0);
+        assert!(first > 0);
+        assert!(first < 0x2000);
+
+        for _ in 0..40 {
+            apu.step_voice_envelope(0);
+        }
+        assert_eq!(apu.dsp_voices[0].envelope_stage, 2);
+        assert_eq!(apu.dsp_voices[0].envelope, 0x2000);
+    }
+
+    #[test]
+    fn dsp_adsr_release_reaches_silence_and_deactivates_voice() {
+        let mut apu = Apu::default();
+        apu.dsp_voices[0].active = true;
+        apu.dsp_voices[0].release = true;
+        apu.dsp_voices[0].envelope = 0x1000;
+
+        assert_eq!(apu.step_voice_envelope(0), 0x0c00);
+        for _ in 0..4 {
+            apu.step_voice_envelope(0);
+        }
+        assert_eq!(apu.dsp_voices[0].envelope, 0);
+        assert!(!apu.dsp_voices[0].active);
     }
 }

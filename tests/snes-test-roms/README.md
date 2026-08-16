@@ -121,7 +121,7 @@ one file-count or exit-status check:
 | --- | --- |
 | SingleStepTests `v1/*.json` | Initial/final CPU state, memory, and the applicable bus-access sequence. |
 | PeterLemon CPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. |
-| higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. |
+| higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`). |
 
 The corpus also contains `.spc`, `.bin`, source, and standalone image files.
 Those are fixtures for a future subsystem harness, not bootable SNES ROM cases.
@@ -137,8 +137,9 @@ cargo run -p snes-render --bin snes-test -- \
 Its `ticks=... stopped=...` output proves only that loading and bounded
 execution completed. `stopped=true` is not a correctness result, and
 `stopped=false` is not a failure. It does not capture a frame or compare an
-image. Use `snes-acceptance` for descriptor-driven frame oracles; it still does
-not run the SingleStepTests JSON vectors. The opt-in JSON-vector command is:
+image. Use `snes-acceptance` for descriptor-driven frame or explicit
+result-protocol oracles; it still does not run the SingleStepTests JSON vectors.
+The opt-in JSON-vector command is:
 
 ```sh
 cargo run -p snes-render --bin snes-65816-conformance -- \

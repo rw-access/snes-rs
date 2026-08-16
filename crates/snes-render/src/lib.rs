@@ -13,5 +13,8 @@ pub use conformance::{
     run_vector, BusCycle, ConformanceError, CpuVector, VectorFile, VectorMismatch, VectorReport,
     VectorState, VectorStatus,
 };
-pub use headless::{HeadlessRunner, RomRunResult, RomTestDescriptor};
+pub use headless::{
+    HeadlessRunner, ResultObservation, ResultProtocol, ResultStatus, RomRunResult,
+    RomTestDescriptor,
+};
 pub use visual::{compare_frame, compare_frame_masked, pixel_within_tolerance, PixelMismatch};

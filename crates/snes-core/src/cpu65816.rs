@@ -1514,7 +1514,11 @@ impl Cpu65816 {
                     let value = self.read_value(
                         bus,
                         address,
-                        self.index_is_8_bit(),
+                        if opcode == 0xad {
+                            self.accumulator_is_8_bit()
+                        } else {
+                            self.index_is_8_bit()
+                        },
                         &mut trace,
                         &mut cycles,
                         &mut master_ticks,
@@ -2021,7 +2025,10 @@ impl Cpu65816 {
                     }
                     0x7b => {
                         self.state.a = self.state.direct_page;
-                        self.set_zero_negative(self.state.a, self.accumulator_is_8_bit());
+                        // TDC is a 16-bit transfer even when M is set.  Its
+                        // N/Z result is therefore based on the full direct-page
+                        // register, not the accumulator's visible width.
+                        self.set_zero_negative(self.state.a, false);
                     }
                     0x9b => {
                         self.state.y = self.state.x;
@@ -2390,7 +2397,11 @@ impl Cpu65816 {
         } else {
             self.state.data_bank
         };
-        Address24::new((u32::from(bank) << 16) | u32::from(base.wrapping_add(index)))
+        Address24::new(
+            (u32::from(bank) << 16)
+                .wrapping_add(u32::from(base))
+                .wrapping_add(u32::from(index)),
+        )
     }
 
     fn fetch_direct_indirect_address(
@@ -2488,7 +2499,8 @@ impl Cpu65816 {
         );
         Address24::new(
             (u32::from(self.state.data_bank) << 16)
-                | u32::from(u16::from_le_bytes([low, high]).wrapping_add(self.state.y)),
+                .wrapping_add(u32::from(u16::from_le_bytes([low, high])))
+                .wrapping_add(u32::from(self.state.y)),
         )
     }
 
@@ -3290,12 +3302,12 @@ mod tests {
     }
 
     #[test]
-    fn indirect_indexed_data_addressing_wraps_within_the_data_bank() {
+    fn indirect_indexed_data_addressing_carries_into_the_next_data_bank() {
         let mut bus = FlatBus::new();
         bus.memory[..2].copy_from_slice(&[0xb1, 0x10]);
         bus.memory[0x10] = 0xff;
         bus.memory[0x11] = 0xff;
-        bus.memory[0x010000] = 0x5a;
+        bus.memory[0x020000] = 0x5a;
         let mut cpu = Cpu65816::default();
         cpu.restore(CpuState {
             y: 1,
@@ -3306,6 +3318,65 @@ mod tests {
         cpu.step_with_bus(&mut bus, None);
 
         assert_eq!(cpu.state().a & 0xff, 0x5a);
+    }
+
+    #[test]
+    fn stack_relative_indirect_indexed_address_carries_into_the_data_bank() {
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0xb3, 0x00]);
+        bus.memory[0x01f0] = 0xff;
+        bus.memory[0x01f1] = 0xff;
+        bus.memory[0x020000] = 0x6a;
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            sp: 0x01f0,
+            y: 1,
+            data_bank: 1,
+            status: FLAG_MEMORY,
+            emulation_mode: false,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a & 0xff, 0x6a);
+    }
+
+    #[test]
+    fn tdc_sets_flags_from_the_full_direct_page_value() {
+        let mut bus = FlatBus::new();
+        bus.memory[0] = 0x7b;
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            a: 0x8503,
+            direct_page: 0x6c80,
+            status: FLAG_MEMORY | FLAG_INDEX,
+            emulation_mode: false,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a, 0x6c80);
+        assert_eq!(cpu.state().status & (FLAG_ZERO | FLAG_NEGATIVE), 0);
+    }
+
+    #[test]
+    fn lda_absolute_uses_accumulator_width_not_index_width() {
+        let mut bus = FlatBus::new();
+        bus.memory[..3].copy_from_slice(&[0xad, 0x00, 0x20]);
+        bus.memory[0x2000] = 0x3d;
+        bus.memory[0x2001] = 0xed;
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            status: FLAG_INDEX,
+            emulation_mode: false,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a, 0xed3d);
     }
 
     #[test]
