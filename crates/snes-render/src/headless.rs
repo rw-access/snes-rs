@@ -41,7 +41,7 @@ impl HeadlessRunner {
     /// Loads a ROM image from a file.
     pub fn load_path(&self, path: &Path) -> Result<Console, LoadError> {
         let bytes = fs::read(path).map_err(|_| LoadError::UnsupportedFormat)?;
-        Console::new(RomImage::new(bytes))
+        Console::new(RomImage::load(bytes)?)
     }
 
     pub fn run(&self, console: &mut Console) -> RomRunResult {
