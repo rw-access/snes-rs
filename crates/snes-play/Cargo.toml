@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+snes-core = { path = "../snes-core" }
+
 [[bin]]
 name = "snes-play"
 path = "src/main.rs"

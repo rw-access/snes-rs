@@ -36,6 +36,12 @@ pub struct Ppu {
     pub wh: [u8; 4],
     pub wbglog: u8,
     pub wobjlog: u8,
+    /// Screen mode/video select ($2133), retaining the defined `EXHOiI` bits.
+    ///
+    /// The fixed-size renderer does not expose overscan or interlaced fields,
+    /// but keeping the register state lets software observe the configured
+    /// mode at the same boundary as the other PPU registers.
+    pub setini: u8,
     pub m7sel: u8,
     pub m7a: i16,
     pub m7b: i16,
@@ -84,6 +90,7 @@ impl Default for Ppu {
             wh: [0; 4],
             wbglog: 0,
             wobjlog: 0,
+            setini: 0,
             m7sel: 0,
             m7a: 0x0100,
             m7b: 0,
@@ -239,6 +246,10 @@ impl Ppu {
             0x2126..=0x2129 => self.wh[usize::from(address - 0x2126)] = value,
             0x212a => self.wbglog = value,
             0x212b => self.wobjlog = value,
+            // SETINI is write-only on the PPU.  Bits 5 and 4 are reserved;
+            // retaining only the documented EXHOiI fields prevents them from
+            // becoming accidental state visible to the renderer or snapshots.
+            0x2133 => self.setini = value & 0xcf,
             0x212e => self.tmw = value,
             0x212f => self.tsw = value,
             0x2130 => self.cgwsel = value,
@@ -656,10 +667,16 @@ impl Ppu {
     }
 
     fn bg_scroll_for_mode(&self, mode: u8, layer: usize, x: usize) -> (usize, usize) {
-        let normal = (
+        let mut normal = (
             usize::from(self.bg_hofs[layer]),
             usize::from(self.bg_vofs[layer]),
         );
+        if matches!(mode, 5 | 6) {
+            // Modes 5 and 6 force high resolution.  BGnHOFS advances in
+            // coarse two-high-resolution-pixel units, so the low register
+            // bit cannot select a distinct source pixel.
+            normal.0 &= !1;
+        }
         if !matches!(mode, 2 | 4) || layer >= 2 {
             return normal;
         }
@@ -991,6 +1008,49 @@ mod tests {
         assert_eq!(ppu.vram_address, 5);
         assert_eq!(ppu.read_register(0x2139), 0x78);
         assert_eq!(ppu.vram_address, 6);
+    }
+
+    #[test]
+    fn setini_masks_reserved_bits_and_is_write_only() {
+        let mut ppu = Ppu::default();
+
+        ppu.write_register(0x2133, 0xff);
+        assert_eq!(ppu.setini, 0xcf);
+        assert_eq!(ppu.read_register(0x2133), 0);
+
+        ppu.write_register(0x2133, 0x0c); // high-res plus overscan
+        assert_eq!(ppu.setini, 0x0c);
+        assert_eq!(ppu.read_register(0x2133), 0);
+    }
+
+    #[test]
+    fn modes_five_and_six_ignore_odd_high_resolution_scroll() {
+        for mode in [5, 6] {
+            let mut ppu = Ppu::default();
+            ppu.inidisp = 0;
+            ppu.bgmode = mode;
+            ppu.tm = 0x01;
+            ppu.cgram[1] = 0x001f;
+            ppu.vram[0] = 1;
+            // Color 1 exists only at source column zero of the 16-pixel
+            // high-resolution character.
+            ppu.vram[16] = 0x0080;
+
+            let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+            ppu.bg_hofs[0] = 0;
+            ppu.render_frame(&mut frame);
+            let unscrolled = frame[0];
+
+            ppu.bg_hofs[0] = 1;
+            frame.fill(0);
+            ppu.render_frame(&mut frame);
+            assert_eq!(frame[0], unscrolled, "mode {mode} accepted odd HOFS");
+
+            ppu.bg_hofs[0] = 2;
+            frame.fill(0);
+            ppu.render_frame(&mut frame);
+            assert_eq!(frame[0], ppu.color_to_rgba(0), "mode {mode} did not scroll");
+        }
     }
 
     #[test]

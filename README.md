@@ -14,7 +14,8 @@ paths), SPC700/APU I/O, and a bounded BRR/DSP mixer.
   rewind APIs.
 - `crates/snes-render` — headless ROM execution, conformance, and visual
   acceptance tools.
-- `crates/snes-play` — reserved optional desktop frontend entry point.
+- `crates/snes-play` — dependency-light bounded-run CLI with optional PPM
+  framebuffer output.
 - `docs/accuracy.md` — authoritative reference ledger.
 - `tests/` — local fixtures and the documented opt-in ROM corpus location.
 
@@ -38,6 +39,12 @@ Run a bounded ROM smoke test:
 
 ```sh
 cargo run -p snes-render --bin snes-test -- path/to/game.sfc 1000000
+```
+
+Run the integrated CLI frontend and capture a frame:
+
+```sh
+cargo run -p snes-play -- path/to/game.sfc --frames 1 --ppm frame.ppm
 ```
 
 Run the opt-in 65816 vector harness against a materialized SingleStepTests
