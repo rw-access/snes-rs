@@ -854,7 +854,7 @@ impl Spc700 {
                 let value = self.read_direct_word(ram, address);
                 self.a = value as u8;
                 self.y = (value >> 8) as u8;
-                self.set_zero_negative(self.y);
+                self.set_word_zero_negative(value);
                 5
             }
             0xda => {
@@ -871,7 +871,7 @@ impl Spc700 {
                     next.wrapping_sub(1)
                 };
                 self.write_direct_word(ram, address, result);
-                self.set_zero_negative((result >> 8) as u8);
+                self.set_word_zero_negative(result);
                 6
             }
             0x7a | 0x9a | 0x5a => {
@@ -1363,6 +1363,12 @@ impl Spc700 {
             | if value & 0x80 != 0 { 0x80 } else { 0 };
     }
 
+    fn set_word_zero_negative(&mut self, value: u16) {
+        self.psw = (self.psw & !0x82)
+            | if value == 0 { 0x02 } else { 0 }
+            | if value & 0x8000 != 0 { 0x80 } else { 0 };
+    }
+
     fn compare(&mut self, left: u8, right: u8) {
         let result = left.wrapping_sub(right);
         self.psw = (self.psw & !0x83)
@@ -1737,6 +1743,36 @@ mod tests {
             (u16::from(sub.spc700.y) << 8) | u16::from(sub.spc700.a),
             0x00ff
         );
+    }
+
+    #[test]
+    fn spc700_word_load_and_modify_flags_use_the_full_word() {
+        let mut load = Apu::default();
+        load.ram[0x20] = 0x01;
+        load.ram[0x21] = 0x00;
+        load.ram[..2].copy_from_slice(&[0xba, 0x20]); // MOVW YA,$20 -> $0001
+        assert_eq!(load.step_spc700(), 5);
+        assert_eq!(
+            (u16::from(load.spc700.y) << 8) | u16::from(load.spc700.a),
+            0x0001
+        );
+        assert_eq!(load.spc700.psw & 0x82, 0);
+
+        let mut increment = Apu::default();
+        increment.ram[0x20] = 0x00;
+        increment.ram[0x21] = 0x00;
+        increment.ram[..2].copy_from_slice(&[0x3a, 0x20]); // INCW $20 -> $0001
+        assert_eq!(increment.step_spc700(), 6);
+        assert_eq!(increment.ram[0x20..=0x21], [0x01, 0x00]);
+        assert_eq!(increment.spc700.psw & 0x02, 0);
+
+        let mut decrement = Apu::default();
+        decrement.ram[0x20] = 0x00;
+        decrement.ram[0x21] = 0x01;
+        decrement.ram[..2].copy_from_slice(&[0x1a, 0x20]); // DECW $20 -> $00ff
+        assert_eq!(decrement.step_spc700(), 6);
+        assert_eq!(decrement.ram[0x20..=0x21], [0xff, 0x00]);
+        assert_eq!(decrement.spc700.psw & 0x02, 0);
     }
 
     #[test]

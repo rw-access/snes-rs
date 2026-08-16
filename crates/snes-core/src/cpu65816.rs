@@ -2415,11 +2415,12 @@ impl Cpu65816 {
         count: &mut u32,
     ) -> Address24 {
         let offset = self.fetch_byte(bus, trace, cycles, ticks, count);
-        let pointer = self
-            .state
-            .direct_page
-            .wrapping_add(u16::from(offset))
-            .wrapping_add(index);
+        let indexed_offset = if self.state.emulation_mode && self.state.direct_page & 0x00ff == 0 {
+            u16::from(offset.wrapping_add(index as u8))
+        } else {
+            u16::from(offset).wrapping_add(index)
+        };
+        let pointer = self.state.direct_page.wrapping_add(indexed_offset);
         let low = self.read(
             bus,
             Address24::new(u32::from(pointer)),
@@ -3094,6 +3095,29 @@ mod tests {
         cpu.step_with_bus(&mut bus, None);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().a & 0xff, 0x5a);
+    }
+
+    #[test]
+    fn emulation_direct_indexed_indirect_wraps_the_direct_page_low_byte() {
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0x01, 0xb6]); // ORA ($b6,X)
+        bus.memory[0x00b2af] = 0x6c;
+        bus.memory[0x00b2b0] = 0x8b;
+        bus.memory[0xb88b6c] = 0x9a;
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            a: 0x41c8,
+            x: 0x00f9,
+            direct_page: 0xb200,
+            data_bank: 0xb8,
+            status: FLAG_MEMORY | FLAG_INDEX,
+            emulation_mode: true,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a, 0x41da);
     }
 
     #[test]

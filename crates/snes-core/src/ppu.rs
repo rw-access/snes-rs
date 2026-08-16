@@ -268,7 +268,7 @@ impl Ppu {
         }
 
         match self.bgmode & 0x07 {
-            0 | 1 | 2 => self.render_tile_mode(pixels, self.bgmode & 0x07),
+            0 | 1 | 2 | 3 => self.render_tile_mode(pixels, self.bgmode & 0x07),
             7 => self.render_mode7(pixels),
             _ => {}
         }
@@ -305,7 +305,7 @@ impl Ppu {
         };
         let layers = match mode {
             1 => 3,
-            2 => 2,
+            2 | 3 => 2,
             _ => 4,
         };
         for &(layer, high) in &[
@@ -484,7 +484,7 @@ impl Ppu {
                 _ => 0,
             };
         }
-        if mode == 2 {
+        if matches!(mode, 2 | 3) {
             return match (layer, high) {
                 (0, true) => 11, // 1H
                 (1, true) => 8,  // 2H
@@ -542,21 +542,42 @@ impl Ppu {
             column = 7 - column;
         }
         let tile_base = self.bg_tile_base(layer);
-        let row_base = (tile_base + usize::from(entry & 0x03ff) * 16 + row * 2) & 0x7fff;
+        let eight_bpp = mode == 3 && layer == 0;
+        let tile_stride = if eight_bpp { 32 } else { 16 };
+        let tile_base = tile_base + usize::from(entry & 0x03ff) * tile_stride;
+        let row_base = (tile_base + row * 2) & 0x7fff;
         let bit = 7 - column;
         let mut color = ((self.vram[row_base] >> bit) & 1)
             | (((self.vram[(row_base + 1) & 0x7fff] >> bit) & 1) << 1);
-        let four_bpp = matches!(mode, 1 | 2) && layer < 2;
+        let four_bpp = eight_bpp || (matches!(mode, 1 | 2 | 3) && layer < 2);
         if four_bpp {
-            let tile_row_base = tile_base + usize::from(entry & 0x03ff) * 16 + 8 + row * 2;
+            let tile_row_base = tile_base + 8 + row * 2;
             color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 2)
                 | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 3);
+        }
+        if eight_bpp {
+            let tile_row_base = tile_base + 16 + row * 2;
+            color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 4)
+                | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 5);
+            let tile_row_base = tile_base + 24 + row * 2;
+            color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 6)
+                | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 7);
         }
         if color == 0 {
             (0, false)
         } else {
-            let palette = usize::from((entry >> 10) & 0x07);
-            let palette_width = if four_bpp { 16 } else { 4 };
+            let palette = if eight_bpp {
+                0
+            } else {
+                usize::from((entry >> 10) & 0x07)
+            };
+            let palette_width = if eight_bpp {
+                256
+            } else if four_bpp {
+                16
+            } else {
+                4
+            };
             ((palette * palette_width + usize::from(color)) as u8, high)
         }
     }
@@ -1028,6 +1049,65 @@ mod tests {
         assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
         assert_eq!(frame[1], ppu.color_to_rgba(0x001f));
         assert_eq!(frame[8], ppu.color_to_rgba(0));
+    }
+
+    #[test]
+    fn mode_three_renders_bg1_eight_bpp_palette_index() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 3;
+        ppu.tm = 0x01;
+        ppu.cgram[0xa5] = 0x001f;
+
+        // Map entry 1 selects the second 8bpp tile.  Mode 3 tiles occupy
+        // twice as many modeled VRAM words as 4bpp tiles.
+        ppu.vram[0] = 1;
+        let tile_base = 32;
+        // Pixel 0 is 0xa5 = planes 0, 2, 5, and 7.
+        ppu.vram[tile_base] = 0x0080;
+        ppu.vram[tile_base + 8] = 0x0080;
+        ppu.vram[tile_base + 17] = 0x0080;
+        ppu.vram[tile_base + 25] = 0x0080;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[1], ppu.color_to_rgba(0));
+    }
+
+    #[test]
+    fn mode_three_uses_bg2_palette_groups_and_priority_order() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 3;
+        ppu.tm = 0x03; // BG1 and BG2.
+        ppu.bg2sc = 0x04;
+        ppu.bg12nba = 0x10; // BG1 at 0, BG2 at 0x1000.
+        ppu.cgram[1] = 0x001f;
+        ppu.cgram[53] = 0x03e0; // BG2 palette 3, color 5.
+
+        // Both layers produce an opaque pixel at the origin.
+        ppu.vram[0] = 1;
+        ppu.vram[32] = 0x0080; // BG1 color 1.
+        ppu.vram[0x0400] = 1 | (3 << 10);
+        ppu.vram[0x1010] = 0x0080; // BG2 color bit 0.
+        ppu.vram[0x1018] = 0x0080; // BG2 color bit 2 => color 5.
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+
+        // Mode 3 low-priority order is BG1L in front of BG2L.
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+
+        // BG2H is in front of BG1L, while BG1H is in front of BG2H.
+        ppu.vram[0x0400] |= 1 << 13;
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+
+        ppu.vram[0] |= 1 << 13;
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
     }
 
     #[test]
