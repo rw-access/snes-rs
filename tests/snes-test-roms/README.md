@@ -21,6 +21,27 @@ access the network.
 The pins and selected subpaths are authoritative in `sources.json`; keep this
 README descriptive so the manifest remains machine-readable.
 
+## Reproducible corpus inventory
+
+The checked-in [smoke.json](smoke.json) records the expected candidate count,
+bounded execution limit, unsupported-format breakdown, and source revisions
+for the materialized corpus. Reproduce and verify it from the repository root:
+
+```sh
+cargo build -p snes-render --bin snes-test
+python3 scripts/run_snes_corpus_smoke.py \
+  --report target/snes-corpus-smoke.json
+```
+
+The command walks candidates in sorted order and invokes the same bounded
+`snes-test` runner for every `.sfc` and `.smc` file. Exit code 0 means there
+were no unexpected runner failures and the inventory matched `smoke.json`.
+`unsupported-coprocessor` and `unsupported-format` are reported explicitly,
+not counted as supported runs. A `supported-bounded-runs` result only proves
+that loading and bounded execution completed; it is not an emulator-correctness
+claim. Use `--no-expected` when auditing a deliberately changed corpus before
+updating the baseline with reviewed evidence.
+
 ## Fetch and materialize
 
 From the repository root, run:
@@ -125,7 +146,7 @@ one file-count or exit-status check:
 | Material | Correct oracle |
 | --- | --- |
 | SingleStepTests `v1/*.json` | Initial/final CPU state, memory, and the applicable bus-access sequence. |
-| PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. The newly materialized PPU cases remain diagnostic while tile-edge differences are resolved. |
+| PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. Ten 256x224 PPU pairs are strict exact-match gates (zero tolerance, empty masks); captures requiring 512x448/interlace output or unsupported reference formats remain diagnostic. |
 | higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`) and gilyon's SPC700 port `$2140` result (`0=running`, `1=passed`, `2=failed`). |
 
 The corpus also contains `.spc`, `.bin`, source, and standalone image files.

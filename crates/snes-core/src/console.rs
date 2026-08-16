@@ -675,7 +675,9 @@ mod tests {
         bus.write(Address24::new(0x002100), 0x12);
         assert_eq!(bus.read(Address24::new(0x802100)), 0x12);
         bus.write(Address24::new(0x002140), 0x34);
-        assert_eq!(bus.read(Address24::new(0x802140)), 0x34);
+        // CPU writes feed the SPC700 input latch; the CPU reads the separate
+        // SPC700 output latch until the SPC writes a response.
+        assert_eq!(bus.read(Address24::new(0x802140)), 0);
         assert_eq!(bus.read(Address24::new(0x004016)), 1);
         assert_eq!(bus.read(Address24::new(0x004017)), 0x1c);
         bus.write(Address24::new(0x004017), 0);

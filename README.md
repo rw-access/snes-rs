@@ -35,6 +35,19 @@ python3 scripts/fetch_snes_test_roms.py --verify-only
 python3 scripts/fetch_snes_test_roms.py
 ```
 
+After building the headless runner, reproduce the pinned corpus capability
+inventory. This reports bounded execution separately from known unsupported
+cartridge formats and checks the result against `tests/snes-test-roms/smoke.json`:
+
+```sh
+cargo build -p snes-render --bin snes-test
+python3 scripts/run_snes_corpus_smoke.py \
+  --report target/snes-corpus-smoke.json
+```
+
+The `supported-bounded-runs` count is not a correctness pass; only explicit
+result or visual acceptance cases can establish correctness.
+
 Run a bounded ROM smoke test:
 
 ```sh
@@ -78,5 +91,6 @@ cargo run -p snes-render --bin snes-acceptance -- \
 The pinned corpus and its provenance rules are documented in
 `tests/snes-test-roms/README.md`. Ordinary Cargo tests do not download or
 require ROMs. Bounded execution is diagnostic unless a case has a verified
-memory, register, timing, audio, or framebuffer oracle; the current visual
-examples remain diagnostic for that reason.
+memory, register, timing, audio, or framebuffer oracle. The ten enabled
+PeterLemon PPU cases are strict framebuffer gates; other visual examples
+remain diagnostic until their oracle and modeled hardware are sufficient.

@@ -1,11 +1,15 @@
 //! S-CPU/S-SMP communication state and APU memory boundary.
 
-/// Minimal APU state shared through the four CPU-visible ports. The SPC700
-/// execution and DSP mixer consume this state in later audio increments.
+/// Minimal APU state with independent CPU-to-SPC700 and SPC700-to-CPU port
+/// latches. The SPC700 execution and DSP mixer consume this state in later
+/// audio increments.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Apu {
     pub ram: [u8; 65_536],
+    /// Values visible to the CPU at $2140-$2143 (SPC700 -> CPU).
     pub ports: [u8; 4],
+    /// Values visible to the SPC700 at $F4-$F7 (CPU -> SPC700).
+    cpu_ports: [u8; 4],
     pub control: u8,
     pub dsp_address: u8,
     pub dsp: [u8; 128],
@@ -96,6 +100,7 @@ impl Default for Apu {
         Self {
             ram: [0; 65_536],
             ports: [0; 4],
+            cpu_ports: [0; 4],
             control: 0,
             dsp_address: 0,
             dsp: [0; 128],
@@ -129,7 +134,7 @@ impl Apu {
     }
 
     pub fn write_cpu_port(&mut self, port: usize, value: u8) {
-        self.ports[port & 3] = value;
+        self.cpu_ports[port & 3] = value;
     }
 
     pub fn read_ram(&self, address: u16) -> u8 {
@@ -443,7 +448,7 @@ impl Apu {
             0xf0 | 0xf1 | 0xfa | 0xfb | 0xfc => 0,
             0xf2 => self.dsp_address,
             0xf3 => self.read_dsp_data(),
-            0xf4..=0xf7 => self.ports[usize::from(address - 0xf4)],
+            0xf4..=0xf7 => self.cpu_ports[usize::from(address - 0xf4)],
             0xfd..=0xff => {
                 let timer = usize::from(address - 0xfd);
                 let value = self.timer_outputs[timer] & 0x0f;
@@ -463,9 +468,8 @@ impl Apu {
             0xf2 => self.write_dsp_address(value),
             0xf3 => self.write_dsp_data(value),
             0xf4..=0xf7 => {
-                // These are SPC700 output ports.  The current public port
-                // boundary intentionally keeps the pre-existing shared-port
-                // behavior used by the console tests.
+                // These are SPC700-to-CPU output ports; CPU-to-SPC700 input
+                // values remain in the separate `cpu_ports` latches.
                 self.ports[usize::from(address - 0xf4)] = value;
             }
             0xfa..=0xfc => {
@@ -482,6 +486,8 @@ impl Apu {
     /// setup used by the existing instruction tests.
     pub fn boot_spc700(&mut self) {
         self.control = 0xb0;
+        self.ports = [0; 4];
+        self.cpu_ports = [0; 4];
         self.timer_targets = [0; 3];
         self.timer_stage2 = [0; 3];
         self.timer_outputs = [0; 3];
@@ -517,7 +523,7 @@ impl Apu {
         self.ram[0x00f1] = 0;
         self.ram[0x00f2] = self.dsp_address;
         self.ram[0x00f3] = self.read_dsp_data();
-        self.ram[0x00f4..0x00f8].copy_from_slice(&self.ports);
+        self.ram[0x00f4..0x00f8].copy_from_slice(&self.cpu_ports);
         self.ram[0x00fa..0x00fd].fill(0);
         for timer in 0..3 {
             self.ram[0x00fd + timer] = self.timer_outputs[timer] & 0x0f;
@@ -540,7 +546,13 @@ impl Apu {
                 self.write_spc_io(address, self.ram[usize::from(address)]);
             }
         }
-        self.ports.copy_from_slice(&self.ram[0x00f4..0x00f8]);
+        // CPU and SPC700 port writes are separate hardware latches.  The
+        // staged $F4-$F7 bytes are CPU input, so copying them back into the
+        // CPU-visible output ports would erase a just-written CPU value when
+        // the IPL echoes its handshake byte.
+        if let Some(address @ 0xf4..=0xf7) = direct_io_write {
+            self.write_spc_io(address, self.ram[usize::from(address)]);
+        }
     }
 
     fn direct_io_write_address(&self, pc: u16, opcode: u8) -> Option<u8> {
@@ -586,7 +598,7 @@ impl Apu {
             self.ports[2] = 0;
             self.ports[3] = 0;
         }
-        self.ram[0x00f4..0x00f8].copy_from_slice(&self.ports);
+        self.ram[0x00f4..0x00f8].copy_from_slice(&self.cpu_ports);
         for timer in 0..3 {
             let mask = 1 << timer;
             if old & mask == 0 && value & mask != 0 {
@@ -876,29 +888,27 @@ impl Spc700 {
                 self.set_zero_negative(self.a);
                 4
             }
-            0x7d => {
+            0x5d => {
+                // MOV X,A.  This is used by the IPL's indirect jump at
+                // $FFF8 after it assembles the upload destination pointer.
                 self.x = self.a;
-                self.set_zero_negative(self.x);
                 2
             }
-            0x5d => {
+            0x7d => {
+                // MOV A,X.
                 self.a = self.x;
-                self.set_zero_negative(self.a);
                 2
             }
             0xdd => {
                 self.y = self.a;
-                self.set_zero_negative(self.y);
                 2
             }
             0xfd => {
                 self.a = self.y;
-                self.set_zero_negative(self.a);
                 2
             }
             0x9d => {
                 self.x = self.sp;
-                self.set_zero_negative(self.x);
                 2
             }
             0xbd => {
@@ -1944,9 +1954,35 @@ mod tests {
     fn audio_ports_and_reset_control_are_snapshot_ready() {
         let mut apu = Apu::default();
         apu.write_cpu_port(0, 0x5a);
-        assert_eq!(apu.read_cpu_port(0), 0x5a);
+        assert_eq!(apu.read_cpu_port(0), 0);
+        assert_eq!(apu.read_spc_io(0xf4), 0x5a);
+        apu.write_spc_io(0xf4, 0xa5);
+        assert_eq!(apu.read_cpu_port(0), 0xa5);
         apu.write_control(0x10);
         assert_eq!(apu.read_cpu_port(0), 0);
+    }
+
+    #[test]
+    fn spc_and_cpu_port_latches_remain_directional_during_ipl_handshake() {
+        let mut apu = Apu::default();
+        apu.write_cpu_port(0, 0x12);
+        apu.ram[..8].copy_from_slice(&[
+            0xe4, 0xf4, // MOV A,$F4: read the CPU -> SPC latch
+            0xe8, 0x34, // MOV A,#$34
+            0xc4, 0xf4, // MOV $F4,A: write the SPC -> CPU latch
+            0xe4, 0xf4, // MOV A,$F4 again
+        ]);
+
+        assert_eq!(apu.step_spc700(), 3);
+        assert_eq!(apu.spc700.a, 0x12);
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.step_spc700(), 3);
+        assert_eq!(apu.read_cpu_port(0), 0x34);
+
+        apu.write_cpu_port(0, 0x56);
+        assert_eq!(apu.step_spc700(), 3);
+        assert_eq!(apu.spc700.a, 0x56);
+        assert_eq!(apu.read_cpu_port(0), 0x34);
     }
 
     #[test]
@@ -2061,14 +2097,14 @@ mod tests {
         let mut apu = Apu::default();
         apu.ram[..16].copy_from_slice(&[
             0xe8, 0xa5, // MOV A,#$a5
-            0x7d, // MOV X,A
+            0x5d, // MOV X,A
             0xdd, // MOV Y,A
             0x4d, // PUSH X
             0x6d, // PUSH Y
             0xe8, 0x00, // MOV A,#$00
             0xee, // POP Y
             0xce, // POP X
-            0xfd, // MOV A,Y
+            0x7d, // MOV A,X
             0x0d, // PUSH PSW
             0xe8, 0x00, // MOV A,#$00
             0x8e, // POP PSW
@@ -2083,7 +2119,44 @@ mod tests {
         assert_eq!(apu.spc700.x, 0xa5);
         assert_eq!(apu.spc700.y, 0xa5);
         assert_eq!(apu.spc700.sp, 0xef);
-        assert_eq!(apu.spc700.psw & 0x82, 0x80);
+        assert_eq!(apu.spc700.psw & 0x82, 0x02);
+    }
+
+    #[test]
+    fn spc700_accumulator_index_register_transfers_match_ipl_usage() {
+        let mut apu = Apu::default();
+        apu.ram[..4].copy_from_slice(&[
+            0xe8, 0xa5, // MOV A,#$a5
+            0x5d, // MOV X,A (the IPL uses this at $FFF8)
+            0x7d, // MOV A,X
+        ]);
+
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.spc700.x, 0xa5);
+        assert_eq!(apu.spc700.a, 0xa5);
+        assert_eq!(apu.step_spc700(), 2);
+        assert_eq!(apu.spc700.a, 0xa5);
+    }
+
+    #[test]
+    fn spc700_register_transfers_preserve_condition_codes() {
+        let mut apu = Apu::default();
+        apu.spc700.psw = 0x49;
+        apu.spc700.sp = 0xef;
+        apu.ram[..7].copy_from_slice(&[
+            0xe8, 0x00, // MOV A,#$00 establishes Z while preserving C/V
+            0x5d, // MOV X,A
+            0x7d, // MOV A,X
+            0xdd, // MOV Y,A
+            0xfd, // MOV A,Y
+            0x9d, // MOV X,SP
+        ]);
+
+        for _ in 0..6 {
+            assert_eq!(apu.step_spc700(), 2);
+            assert_eq!(apu.spc700.psw, 0x4b);
+        }
     }
 
     #[test]

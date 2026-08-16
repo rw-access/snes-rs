@@ -29,7 +29,7 @@ accepted according to their role:
 | Corpus material | Acceptance role | Required evidence | Current status |
 | --- | --- | --- | --- |
 | `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Optional runner passes all 50,800 selected vectors; bus-cycle records are parsed but intentionally not compared. |
-| `peterlemon-snes/CPUTest/CPU/*.sfc`, `PPU/**/*.sfc`, and `SPC700/**/*.sfc` with available fixtures | CPU/PPU/APU integration | Run the matching ROM to its documented result, capture a declared frame or audio result, and compare the matching lossless reference where an oracle is defined. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; the materialized PPU PNG cases are currently diagnostic while tile-edge differences are resolved. |
+| `peterlemon-snes/CPUTest/CPU/*.sfc`, `PPU/**/*.sfc`, and `SPC700/**/*.sfc` with available fixtures | CPU/PPU/APU integration | Run the matching ROM to its documented result, capture a declared frame or audio result, and compare the matching lossless reference where an oracle is defined. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; ten 256x224 PeterLemon PPU PNG pairs are enabled strict gates with zero tolerance and empty masks. Other captures remain diagnostic when their dimensions, format, or modeled hardware behavior is outside the current baseline. |
 | Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | The harness supports an explicit `memory-byte` protocol; only documented cases may use it. Other cases remain diagnostic. |
 | `.spc`, `.bin`, source files, and standalone image/audio fixtures | Subsystem fixture | Consume them only through the subsystem-specific harness that defines their format and oracle. | Must not be passed to the SNES boot-ROM runner as a suite. |
 
@@ -44,9 +44,15 @@ The corpus gates are intentionally layered:
 2. A real fetch must resolve every selected cache to the exact manifest commit
    and materialize at least one selected file. The cache's `rev-parse` result is
    the provenance check; file counts alone are not.
-3. `cargo test --workspace` proves only the checked-in unit and boundary tests.
+3. `python3 scripts/run_snes_corpus_smoke.py` walks every materialized `.sfc`
+   and `.smc` candidate with a fixed 100,000-master-tick bound. It reports
+   supported bounded runs, known unsupported coprocessor/format categories,
+   and unexpected failures separately, and compares the pinned-source counts
+   with `tests/snes-test-roms/smoke.json`. This is a reproducibility and
+   capability inventory, not a correctness pass.
+4. `cargo test --workspace` proves only the checked-in unit and boundary tests.
    It deliberately says nothing about the optional corpus.
-4. An external-ROM gate may be called a pass only when it reports the named
+5. An external-ROM gate may be called a pass only when it reports the named
    oracle for every selected case. The current `snes-test` binary reports only
    bounded ticks and `stopped`; it is not that gate.
 
@@ -91,16 +97,17 @@ diff image together with case metadata under
 one-byte-per-pixel mask. The harness decodes binary P6 PPM, little-endian
 ARGB32, PNG, and JPEG references, with reference dimensions checked before
 comparison and supplied reference SHA-256 values checked before decoding. PNG
-chunk checksums are also verified by the PNG decoder. No pinned visual ROM is
-currently an enabled strict golden gate: decoder support alone is not a valid
-oracle, and each enabled case still needs a matching expected capture plus a
-documented tolerance/mask and result contract.
+chunk checksums are also verified by the PNG decoder. Ten pinned PeterLemon PPU
+captures are currently enabled strict golden gates: they match exactly at their
+declared frames with zero tolerance and empty masks. Decoder support alone is
+not a valid oracle; every enabled case still needs a matching expected capture
+and a documented comparison contract.
 
-Before enabling one, the harness must prove determinism by running the same ROM
-and input sequence twice from reset and comparing the captured frame and the
-relevant machine-state/result oracle. `run_for_frames` plus `next_frame` is not
-yet sufficient evidence by itself: the current frame duration is an approximate
-bound and scanline/VBlank frame synchronization is still incomplete.
+The harness proves determinism for these cases by running the same ROM and input
+sequence twice from reset and comparing the captured frame and relevant
+machine-state/result observation. `run_for_frames` plus `next_frame` remains an
+approximate frame-bound mechanism, so captures that require interlace, hires
+512x448 output, or exact scanline/VBlank synchronization remain diagnostic.
 
 ## Optional 65816 JSON-vector runner
 
@@ -170,7 +177,7 @@ HDMA behavior, full PPU mode/priority/window and Mode 7 edge behavior,
 scanline sprite limits, exact DSP envelope/interpolation/noise/echo behavior,
 enhancement-chip cartridges,
 automatic CI execution of the JSON-vector gate, and pinned ROM expected-result
-plus visual golden runs.
+oracles plus broader visual golden coverage.
 The
 acceptance harness now has per-ROM descriptors, ROM/reference provenance,
 bounded execution, frame capture, deterministic replay, and diff artifacts;

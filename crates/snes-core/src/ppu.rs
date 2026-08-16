@@ -296,9 +296,12 @@ impl Ppu {
 
     fn render_tile_mode(&self, pixels: &mut [u32], mode: u8) {
         for y in 0..SCREEN_HEIGHT {
+            // Scanline 0 is hidden on the SNES; a 224-line viewport exposes
+            // PPU scanlines 1 through 224 instead.
+            let ppu_y = y + 1;
             for x in 0..SCREEN_WIDTH {
-                let main = self.screen_pixel(x, y, mode, self.tm, self.tmw, false);
-                let sub = self.screen_pixel(x, y, mode, self.ts, self.tsw, true);
+                let main = self.screen_pixel(x, ppu_y, mode, self.tm, self.tmw, false);
+                let sub = self.screen_pixel(x, ppu_y, mode, self.ts, self.tsw, true);
                 let color = self.compose_screens(main, sub, x);
                 pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
             }
@@ -316,10 +319,12 @@ impl Ppu {
     /// introduced.
     fn render_hires_tile_mode(&self, pixels: &mut [u32], mode: u8) {
         for y in 0..SCREEN_HEIGHT {
+            let ppu_y = y + 1;
             for x in 0..SCREEN_WIDTH {
                 let hires_x = x * 2;
-                let main = self.screen_pixel_at(hires_x, y, mode, self.tm, self.tmw, false, true);
-                let sub = self.screen_pixel_at(hires_x, y, mode, self.ts, self.tsw, true, true);
+                let main =
+                    self.screen_pixel_at(hires_x, ppu_y, mode, self.tm, self.tmw, false, true);
+                let sub = self.screen_pixel_at(hires_x, ppu_y, mode, self.ts, self.tsw, true, true);
                 let color = self.compose_screens(main, sub, x);
                 pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
             }
@@ -871,9 +876,10 @@ impl Ppu {
         let origin_x = i32::from(self.m7x);
         let origin_y = i32::from(self.m7y);
         for y in 0..SCREEN_HEIGHT {
+            let ppu_y = y + 1;
             for x in 0..SCREEN_WIDTH {
                 let screen_x = i32::try_from(x).unwrap_or(0) - 128;
-                let screen_y = i32::try_from(y).unwrap_or(0) - 112;
+                let screen_y = i32::try_from(ppu_y).unwrap_or(0) - 112;
                 let mut source_x = origin_x + ((a * screen_x + b * screen_y) >> 8);
                 let mut source_y = origin_y + ((c * screen_x + d * screen_y) >> 8);
                 if self.m7sel & 0x01 != 0 {
@@ -1024,6 +1030,37 @@ mod tests {
     }
 
     #[test]
+    fn default_224_line_viewport_maps_visible_scanlines_one_through_224() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.tm = 0x01;
+        ppu.cgram[1] = 0x001f;
+        ppu.cgram[2] = 0x03e0;
+        ppu.cgram[3] = 0x7c00;
+
+        // BG1 map entry 1 selects a tile whose first row is red and second
+        // row is green.  The hidden scanline 0 must therefore leave green at
+        // the top of the public 224-line framebuffer.
+        ppu.vram[0] = 1;
+        ppu.vram[8] = 0x00ff;
+        ppu.vram[9] = 0xff00;
+
+        // The extra visible scanline 224 samples map row 28.  Put a blue
+        // tile there so the bottom-edge convention is tested as well.
+        ppu.vram[28 * 32] = 2;
+        ppu.vram[16] = 0xffff;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+        assert_eq!(
+            frame[(SCREEN_HEIGHT - 1) * SCREEN_WIDTH],
+            ppu.color_to_rgba(0x7c00)
+        );
+    }
+
+    #[test]
     fn modes_five_and_six_ignore_odd_high_resolution_scroll() {
         for mode in [5, 6] {
             let mut ppu = Ppu::default();
@@ -1035,6 +1072,7 @@ mod tests {
             // Color 1 exists only at source column zero of the 16-pixel
             // high-resolution character.
             ppu.vram[16] = 0x0080;
+            ppu.vram[17] = 0x0080;
 
             let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
             ppu.bg_hofs[0] = 0;
@@ -1067,7 +1105,7 @@ mod tests {
         ppu.write_register(0x2116, 8);
         ppu.write_register(0x2117, 0);
         for row in 0..8 {
-            let word = if row == 0 { 0x8080 } else { 0 };
+            let word = if row <= 1 { 0x8080 } else { 0 };
             ppu.write_register(0x2118, word as u8);
             ppu.write_register(0x2119, (word >> 8) as u8);
         }
@@ -1115,6 +1153,7 @@ mod tests {
         for layer in 0..4 {
             let tile_base = layer * 0x1000;
             ppu.vram[tile_base + 8] = 0x0080;
+            ppu.vram[tile_base + 9] = 0x0080;
             ppu.vram[layer * 0x400] = 1;
         }
 
@@ -1170,14 +1209,14 @@ mod tests {
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
-        assert_eq!(frame[20 * SCREEN_WIDTH + 10], ppu.color_to_rgba(0x001f));
-        assert_eq!(frame[20 * SCREEN_WIDTH + 17], ppu.color_to_rgba(0x03e0));
+        assert_eq!(frame[19 * SCREEN_WIDTH + 10], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[19 * SCREEN_WIDTH + 17], ppu.color_to_rgba(0x03e0));
 
         ppu.oam[3] = 0x40; // horizontal flip
         frame.fill(0);
         ppu.render_frame(&mut frame);
-        assert_eq!(frame[20 * SCREEN_WIDTH + 10], ppu.color_to_rgba(0x03e0));
-        assert_eq!(frame[20 * SCREEN_WIDTH + 17], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[19 * SCREEN_WIDTH + 10], ppu.color_to_rgba(0x03e0));
+        assert_eq!(frame[19 * SCREEN_WIDTH + 17], ppu.color_to_rgba(0x001f));
     }
 
     #[test]
@@ -1191,10 +1230,12 @@ mod tests {
 
         // BG1 high-priority color 1 at the origin.
         ppu.vram[8] = 0x0080;
+        ppu.vram[9] = 0x0080;
         ppu.vram[0x400] = 1 | (1 << 13);
         // OBJ color 1 at the same screen pixel, with the lowest OBJ priority
         // so that the high BG1 plane remains in front of it.
         ppu.vram[0] = 0x0080;
+        ppu.vram[1] = 0x0080;
         ppu.oam[0..4].copy_from_slice(&[0, 0, 0, 0x00]);
         ppu.oam[512] = 0;
 
@@ -1240,7 +1281,9 @@ mod tests {
         // the first two pixels, producing color 13 (1 + 4 + 8).
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x00c0;
+        ppu.vram[17] = 0x00c0;
         ppu.vram[24] = 0xc0c0;
+        ppu.vram[25] = 0xc0c0;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1267,6 +1310,10 @@ mod tests {
         ppu.vram[tile_base + 8] = 0x0080;
         ppu.vram[tile_base + 16] = 0x8000;
         ppu.vram[tile_base + 24] = 0x8000;
+        ppu.vram[tile_base + 1] = 0x0080;
+        ppu.vram[tile_base + 9] = 0x0080;
+        ppu.vram[tile_base + 17] = 0x8000;
+        ppu.vram[tile_base + 25] = 0x8000;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1289,9 +1336,12 @@ mod tests {
         // Both layers produce an opaque pixel at the origin.
         ppu.vram[0] = 1;
         ppu.vram[32] = 0x0080; // BG1 color 1.
+        ppu.vram[33] = 0x0080;
         ppu.vram[0x0400] = 1 | (3 << 10);
         ppu.vram[0x1010] = 0x0080; // BG2 color bit 0.
         ppu.vram[0x1018] = 0x0080; // BG2 color bit 2 => color 5.
+        ppu.vram[0x1011] = 0x0080;
+        ppu.vram[0x1019] = 0x0080;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
 
@@ -1324,6 +1374,10 @@ mod tests {
         ppu.vram[40] = 0x0080;
         ppu.vram[48] = 0x8000;
         ppu.vram[56] = 0x8000;
+        ppu.vram[33] = 0x0080;
+        ppu.vram[41] = 0x0080;
+        ppu.vram[49] = 0x8000;
+        ppu.vram[57] = 0x8000;
         ppu.vram[0] |= 0x0000; // Keep the map entry's palette attribute visible.
 
         let expected = ppu.direct_color(0xa5, ppu.vram[0]);
@@ -1349,6 +1403,7 @@ mod tests {
         ppu.cgram[11] = 0x03e0; // BG2 palette 2, color 3.
         ppu.vram[0x0400] = 1 | (2 << 10);
         ppu.vram[0x1008] = 0x8080;
+        ppu.vram[0x1009] = 0x8080;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1371,6 +1426,8 @@ mod tests {
         ppu.vram[0] = 1; // map entry selects tile 1
         ppu.vram[16] = 0x0080; // tile 1, color 1 at pixel 0
         ppu.vram[32] = 0x8000; // tile 2, color 2 at pixel 0
+        ppu.vram[17] = 0x0080;
+        ppu.vram[33] = 0x8000;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1386,6 +1443,7 @@ mod tests {
         ppu.cgram[3] = 0x001f;
         ppu.vram[0x0400] = 1;
         ppu.vram[0x1008] = 0x8080;
+        ppu.vram[0x1009] = 0x8080;
         frame.fill(0);
         ppu.render_frame(&mut frame);
         assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
@@ -1396,6 +1454,7 @@ mod tests {
         ppu.tm = 0x01;
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x0080;
+        ppu.vram[17] = 0x0080;
         ppu.cgram[1] = 0x7c00;
         frame.fill(0);
         ppu.render_frame(&mut frame);
@@ -1436,6 +1495,7 @@ mod tests {
         ppu.cgram[17] = 0x03e0;
         ppu.vram[0x0400] = 1 | (1 << 10);
         ppu.vram[0x1010] = 0x0080;
+        ppu.vram[0x1011] = 0x0080;
         ppu.tm = 0x02;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
@@ -1447,6 +1507,7 @@ mod tests {
         ppu.cgram[5] = 0x7c00;
         ppu.vram[0x0800] = 1 | (1 << 10);
         ppu.vram[0x1008] = 0x0080;
+        ppu.vram[0x1009] = 0x0080;
         ppu.tm = 0x04;
         frame.fill(0);
         ppu.render_frame(&mut frame);
@@ -1466,8 +1527,10 @@ mod tests {
 
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x0080;
+        ppu.vram[17] = 0x0080;
         ppu.vram[0x0400] = 1 | (1 << 10) | (1 << 13);
         ppu.vram[0x1008] = 0x0080;
+        ppu.vram[0x1009] = 0x0080;
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1493,8 +1556,11 @@ mod tests {
         ppu.vram[0x0400] = 1 | (1 << 13);
         ppu.vram[0x0800] = 1 | (1 << 10) | (1 << 13);
         ppu.vram[0x0010] = 0x0080; // BG1 color 1.
+        ppu.vram[0x0011] = 0x0080;
         ppu.vram[0x1010] = 0x0080; // BG2 color 1.
         ppu.vram[0x1018] = 0x0080; // BG2 color 4, making color 5.
+        ppu.vram[0x1011] = 0x0080;
+        ppu.vram[0x1019] = 0x0080;
         let details = ppu.bg_pixel_details(1, 0, 0, true, 2, false);
         assert_eq!((details.0, details.1), (21, true));
 
@@ -1524,6 +1590,8 @@ mod tests {
         // is color 2.
         ppu.vram[0x1010] = 0x00ff;
         ppu.vram[0x1020] = 0xff00;
+        ppu.vram[0x1011] = 0x00ff;
+        ppu.vram[0x1021] = 0xff00;
         ppu.vram[0x0400] = 1;
         ppu.vram[0x0401] = 1;
         ppu.vram[0x0402] = 2;
@@ -1560,8 +1628,10 @@ mod tests {
         ppu.cgram[17] = 0x000f;
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x00c0;
+        ppu.vram[17] = 0x00c0;
         ppu.vram[0x0400] = 1 | (1 << 10);
         ppu.vram[0x1010] = 0x00c0;
+        ppu.vram[0x1011] = 0x00c0;
         ppu.cgwsel = 0x02; // Use the subscreen instead of fixed color.
         ppu.cgadsub = 0x01; // Add BG1 and enable its color math.
         ppu.cgram[0] = 0x001f;
@@ -1592,8 +1662,10 @@ mod tests {
         ppu.cgram[17] = 0x000f;
         ppu.vram[0] = 1;
         ppu.vram[16] = 0x0080;
+        ppu.vram[17] = 0x0080;
         ppu.vram[0x0400] = 1 | (1 << 10);
         ppu.vram[0x1010] = 0x0080;
+        ppu.vram[0x1011] = 0x0080;
         ppu.cgwsel = 0x02;
         ppu.cgadsub = 0xc1; // Subtract BG2 from BG1, then halve.
 
@@ -1620,6 +1692,7 @@ mod tests {
         ppu.cgram[1] = color;
         ppu.vram[0] = 1;
         ppu.vram[8] = 0x00ff;
+        ppu.vram[9] = 0x00ff;
         ppu
     }
 

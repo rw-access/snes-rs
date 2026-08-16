@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "master_ticks": 100000,
+  "rom_extensions": [
+    ".sfc",
+    ".smc"
+  ],
+  "source_revisions": {
+    "singlesteptests-65816": "db6b10401729d5f20f2181dde5d3d7b037093a4a",
+    "peterlemon-snes": "350b394e86ec5d62f600b5cbf64cdce3721bb6ef",
+    "higan-snes-test-roms": "26e8aa91e0d3b90b901e7e693bc4a8244b391d7b"
+  },
+  "counts": {
+    "candidates": 292,
+    "supported": 228,
+    "unsupported-coprocessor": 31,
+    "unsupported-format": 33,
+    "unexpected": 0
+  }
+}

@@ -51,11 +51,9 @@ source = "peterlemon-snes"
 revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
 rom = "PPU/BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.sfc"
 rom_sha256 = "66083b119131d4cd7b3c41301750342152d2c3a3cfce103de074a0ae53330146"
-# The scene is currently a useful visual diagnostic, but exact comparison
-# remains disabled until the renderer's remaining tile-edge differences are
-# resolved.
-enabled = false
-diagnostic_only = true
+# The visible 224-line viewport now aligns with the reference's scanlines.
+enabled = true
+diagnostic_only = false
 max_frames = 10
 max_master_ticks = 5000000
 deterministic_replay = true
@@ -68,6 +66,186 @@ height = 224
 channel_tolerance = 0
 mask = ""
 artifact = "peterlemon-ppu-bgmap-2bpp"
+
+[case.peterlemon-ppu-bgmap-bg2-2bpp]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/BGMAP/8x8/2BPP/8x8BG2Map2BPP32x328PAL/8x8BG2Map2BPP32x328PAL.sfc"
+rom_sha256 = "048fbb0ad29fa6821a127c10a51f8dc3bbc136ef0b678f1bd7b76ea5b6e2c8da"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/BGMAP/8x8/2BPP/8x8BG2Map2BPP32x328PAL/8x8BG2Map2BPP32x328PAL.png"
+reference_sha256 = "4bddbe99a0908aafb7edced99cae381e9022ac1a20689ff298d4dfdb52cad08b"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-bgmap-bg2-2bpp"
+
+[case.peterlemon-ppu-bgmap-bg3-2bpp]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/BGMAP/8x8/2BPP/8x8BG3Map2BPP32x328PAL/8x8BG3Map2BPP32x328PAL.sfc"
+rom_sha256 = "4fa8e6c48e0a3251088ae810fbd7a7022f52427837660669b05e66daf09c3494"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/BGMAP/8x8/2BPP/8x8BG3Map2BPP32x328PAL/8x8BG3Map2BPP32x328PAL.png"
+reference_sha256 = "4bddbe99a0908aafb7edced99cae381e9022ac1a20689ff298d4dfdb52cad08b"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-bgmap-bg3-2bpp"
+
+[case.peterlemon-ppu-bgmap-bg4-2bpp]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/BGMAP/8x8/2BPP/8x8BG4Map2BPP32x328PAL/8x8BG4Map2BPP32x328PAL.sfc"
+rom_sha256 = "18e4d47a265aa3b787e57a6ffc2789cd5cace453e963aa5bc0932ee0c674e6cc"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/BGMAP/8x8/2BPP/8x8BG4Map2BPP32x328PAL/8x8BG4Map2BPP32x328PAL.png"
+reference_sha256 = "4bddbe99a0908aafb7edced99cae381e9022ac1a20689ff298d4dfdb52cad08b"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-bgmap-bg4-2bpp"
+
+[case.peterlemon-ppu-bgmap-4bpp]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.sfc"
+rom_sha256 = "60d4c21e53ee731c15af870eb903fc13220dcbc9dac677ded1355c0b62e428f3"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.png"
+reference_sha256 = "a99f61121ac86f7e038d858d790a50219af1d04f4a895af9f367f4f95195912d"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-bgmap-4bpp"
+
+[case.peterlemon-ppu-bgmap-tileflip-8bpp]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.sfc"
+rom_sha256 = "6107053b6b47baf036332897518a8f49ea57470cad3f6492e4ae763e61163b41"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.png"
+reference_sha256 = "dd499f243ffa8dda32a28eaa10bc351713211fe28d053fb33131da5c860dd804"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-bgmap-tileflip-8bpp"
+
+[case.peterlemon-ppu-hicolor-3840]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/Blend/HiColor/HiColor3840/HiColor3840.sfc"
+rom_sha256 = "b86c4a131809d923187ac14d2ee82d3aef53f7b61246f0aee8a6b2b28cab1256"
+enabled = true
+diagnostic_only = false
+max_frames = 5
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 5
+reference = "PPU/Blend/HiColor/HiColor3840/HiColor3840.png"
+reference_sha256 = "5842fefa5cb514bd7dd1c33c2bfc759043c869b662a4398a9de081e412679903"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-hicolor-3840"
+
+[case.peterlemon-ppu-hicolor-575myst]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/Blend/HiColor/HiColor575Myst/HiColor575Myst.sfc"
+rom_sha256 = "47316ae64e97fcc9d1a89611f3f6668cf036e1ca8bde5fc46c7bb07dafb48a19"
+enabled = true
+diagnostic_only = false
+max_frames = 5
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 5
+reference = "PPU/Blend/HiColor/HiColor575Myst/HiColor575Myst.png"
+reference_sha256 = "ff758152f907e5c82297bf73b99d4a6a4dc80a00bd7c4f8192167d71ecfe5d47"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-hicolor-575myst"
+
+[case.peterlemon-ppu-greenspace]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/GreenSpace/GreenSpace.sfc"
+rom_sha256 = "e3933942eb205f601d96ad9b4cb55d1de4bc44304a038f1ae77686a082ca9196"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/GreenSpace/GreenSpace.png"
+reference_sha256 = "695c56c18fe02f087c7e12930a8505a5c7fdf5a70212e192a2f5a01c4b75809f"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-greenspace"
+
+[case.peterlemon-ppu-rings]
+source = "peterlemon-snes"
+revision = "350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
+rom = "PPU/Rings/Rings.sfc"
+rom_sha256 = "9622cef24adb23093c8b66bbcf807ffb00ceb48ebfd02fa62b49130cdbc1e556"
+enabled = true
+diagnostic_only = false
+max_frames = 4
+max_master_ticks = 5000000
+deterministic_replay = true
+capture_frame = 4
+reference = "PPU/Rings/Rings.png"
+reference_sha256 = "95a91796df58cefb6b86b2cd368ccf6cc465095588720988fe8cbaf318742cd6"
+reference_format = "png"
+width = 256
+height = 224
+channel_tolerance = 0
+mask = ""
+artifact = "peterlemon-ppu-rings"
 
 [case.gilyon-spc700]
 source = "higan-snes-test-roms"
