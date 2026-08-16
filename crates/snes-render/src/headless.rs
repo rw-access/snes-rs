@@ -1,6 +1,6 @@
 //! Headless execution API for ROM and golden-frame tests.
 
-use std::path::Path;
+use std::{fs, path::Path};
 
 use snes_core::{Console, LoadError, RomImage};
 
@@ -12,8 +12,13 @@ pub struct RomTestDescriptor {
     pub max_master_ticks: Option<u64>,
 }
 
-/// Headless runner boundary. Execution behavior is deferred to the console
-/// milestone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RomRunResult {
+    pub master_ticks: u64,
+    pub stopped: bool,
+}
+
+/// Headless runner for bounded, frontend-independent ROM execution.
 #[derive(Default)]
 pub struct HeadlessRunner {
     descriptor: RomTestDescriptor,
@@ -28,13 +33,24 @@ impl HeadlessRunner {
         &self.descriptor
     }
 
-    /// Loads a ROM image from bytes once cartridge loading is implemented.
+    /// Loads a ROM image from bytes.
     pub fn load_bytes(&self, bytes: Vec<u8>) -> Result<Console, LoadError> {
         Console::new(RomImage::new(bytes))
     }
 
-    /// Reserved file-based entry point for the `snes-test` binary.
-    pub fn load_path(&self, _path: &Path) -> Result<Console, LoadError> {
-        Err(LoadError::UnsupportedFormat)
+    /// Loads a ROM image from a file.
+    pub fn load_path(&self, path: &Path) -> Result<Console, LoadError> {
+        let bytes = fs::read(path).map_err(|_| LoadError::UnsupportedFormat)?;
+        Console::new(RomImage::new(bytes))
+    }
+
+    pub fn run(&self, console: &mut Console) -> RomRunResult {
+        console.reset();
+        let limit = self.descriptor.max_master_ticks.unwrap_or(0);
+        console.run_for_master_ticks(limit);
+        RomRunResult {
+            master_ticks: console.master_ticks(),
+            stopped: console.is_stopped(),
+        }
     }
 }

@@ -76,7 +76,17 @@ impl Console {
 
     /// Advances the machine by a number of master-clock ticks.
     pub fn run_for_master_ticks(&mut self, ticks: u64) {
-        self.timing.master_ticks = self.timing.master_ticks.saturating_add(ticks);
+        let start = self.timing.master_ticks;
+        while self.timing.master_ticks.saturating_sub(start) < ticks {
+            if self.cpu.state().stopped {
+                break;
+            }
+            let before = self.timing.master_ticks;
+            self.step_instruction();
+            if self.timing.master_ticks == before {
+                break;
+            }
+        }
     }
 
     /// Produces the next video frame.
@@ -91,6 +101,14 @@ impl Console {
             return self.wram[(raw as usize - 0x7e_0000) % self.wram.len()];
         }
         0
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.cpu.state().stopped
+    }
+
+    pub fn master_ticks(&self) -> u64 {
+        self.timing.master_ticks
     }
 
     /// Captures a deterministic machine-state snapshot boundary.

@@ -2,4 +2,4 @@
 
 pub mod headless;
 
-pub use headless::{HeadlessRunner, RomTestDescriptor};
+pub use headless::{HeadlessRunner, RomRunResult, RomTestDescriptor};
