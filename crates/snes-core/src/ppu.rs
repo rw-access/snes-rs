@@ -268,7 +268,7 @@ impl Ppu {
         }
 
         match self.bgmode & 0x07 {
-            0 | 1 => self.render_tile_mode(pixels, self.bgmode & 0x07),
+            0 | 1 | 2 => self.render_tile_mode(pixels, self.bgmode & 0x07),
             7 => self.render_mode7(pixels),
             _ => {}
         }
@@ -303,7 +303,11 @@ impl Ppu {
             source: 0x20, // backdrop
             priority: 0,
         };
-        let layers = if mode == 1 { 3 } else { 4 };
+        let layers = match mode {
+            1 => 3,
+            2 => 2,
+            _ => 4,
+        };
         for &(layer, high) in &[
             (3usize, false),
             (2, false),
@@ -480,6 +484,15 @@ impl Ppu {
                 _ => 0,
             };
         }
+        if mode == 2 {
+            return match (layer, high) {
+                (0, true) => 11, // 1H
+                (1, true) => 8,  // 2H
+                (0, false) => 5, // 1L
+                (1, false) => 2, // 2L
+                _ => 0,
+            };
+        }
         match (layer, high) {
             (0, true) => 11, // 1H
             (1, true) => 10, // 2H
@@ -511,20 +524,12 @@ impl Ppu {
         mode: u8,
     ) -> (u8, bool) {
         let screen = self.bg_screen(layer);
-        let scroll_x = usize::from(self.bg_hofs[layer]);
-        let scroll_y = usize::from(self.bg_vofs[layer]);
+        let (scroll_x, scroll_y) = self.bg_scroll_for_mode(mode, layer, x);
         let sx = (x + scroll_x) & 0x1ff;
         let sy = (y + scroll_y) & 0x1ff;
         let tile_x = sx / 8;
         let tile_y = sy / 8;
-        let map_base = (usize::from(screen & 0xfc) << 8) & 0x7fff;
-        let map_size_x = if screen & 0x01 != 0 { 64 } else { 32 };
-        let map_size_y = if screen & 0x02 != 0 { 64 } else { 32 };
-        let map_x = tile_x % map_size_x;
-        let map_y = tile_y % map_size_y;
-        let quadrant = (map_x / 32) + 2 * (map_y / 32);
-        let map_index = (map_base + quadrant * 0x400 + (map_y & 31) * 32 + (map_x & 31)) & 0x7fff;
-        let entry = self.vram[map_index];
+        let entry = self.bg_map_entry(screen, tile_x, tile_y);
         if ((entry >> 13) & 1 != 0) != high {
             return (0, false);
         }
@@ -541,7 +546,8 @@ impl Ppu {
         let bit = 7 - column;
         let mut color = ((self.vram[row_base] >> bit) & 1)
             | (((self.vram[(row_base + 1) & 0x7fff] >> bit) & 1) << 1);
-        if mode == 1 && layer < 2 {
+        let four_bpp = matches!(mode, 1 | 2) && layer < 2;
+        if four_bpp {
             let tile_row_base = tile_base + usize::from(entry & 0x03ff) * 16 + 8 + row * 2;
             color |= (((self.vram[tile_row_base & 0x7fff] >> bit) & 1) << 2)
                 | (((self.vram[(tile_row_base + 1) & 0x7fff] >> bit) & 1) << 3);
@@ -550,9 +556,68 @@ impl Ppu {
             (0, false)
         } else {
             let palette = usize::from((entry >> 10) & 0x07);
-            let palette_width = if mode == 1 && layer < 2 { 16 } else { 4 };
+            let palette_width = if four_bpp { 16 } else { 4 };
             ((palette * palette_width + usize::from(color)) as u8, high)
         }
+    }
+
+    fn bg_scroll_for_mode(&self, mode: u8, layer: usize, x: usize) -> (usize, usize) {
+        let normal = (
+            usize::from(self.bg_hofs[layer]),
+            usize::from(self.bg_vofs[layer]),
+        );
+        if mode != 2 || layer >= 2 {
+            return normal;
+        }
+
+        let Some((offset, horizontal)) = self.mode2_offset(layer, x) else {
+            return normal;
+        };
+        if horizontal {
+            (
+                usize::from((offset & 0x03f8) | (self.bg_hofs[layer] & 0x0007)),
+                normal.1,
+            )
+        } else {
+            (normal.0, usize::from(offset & 0x03ff))
+        }
+    }
+
+    fn mode2_offset(&self, layer: usize, x: usize) -> Option<(u16, bool)> {
+        // The first visible tile column is deliberately never offset.  The
+        // first entry in the BG3 table therefore belongs to the next column;
+        // adding the target layer's fine scroll handles a partially visible
+        // first tile as well.
+        let visible_column = (x + usize::from(self.bg_hofs[layer] & 0x0007)) / 8;
+        let offset_column = visible_column.checked_sub(1)?;
+        let bg3_hofs = usize::from(self.bg_hofs[2] & 0x03f8) / 8;
+        let bg3_vofs = usize::from(self.bg_vofs[2] & 0x03f8) / 8;
+        let map_x = bg3_hofs + offset_column;
+
+        let horizontal = self.bg_map_entry(self.bg3sc, map_x, bg3_vofs);
+        if horizontal & (1 << (13 + layer)) != 0 {
+            return Some((horizontal, true));
+        }
+
+        // The vertical row is the row immediately below the horizontal row.
+        // BG3VOFS selects the pair's starting row; its fine scroll is ignored.
+        let vertical = self.bg_map_entry(self.bg3sc, map_x, bg3_vofs + 1);
+        if vertical & (1 << (13 + layer)) != 0 {
+            Some((vertical, false))
+        } else {
+            None
+        }
+    }
+
+    fn bg_map_entry(&self, screen: u8, tile_x: usize, tile_y: usize) -> u16 {
+        let map_base = (usize::from(screen & 0xfc) << 8) & 0x7fff;
+        let map_size_x = if screen & 0x01 != 0 { 64 } else { 32 };
+        let map_size_y = if screen & 0x02 != 0 { 64 } else { 32 };
+        let map_x = tile_x % map_size_x;
+        let map_y = tile_y % map_size_y;
+        let quadrant = (map_x / 32) + 2 * (map_y / 32);
+        let map_index = (map_base + quadrant * 0x400 + (map_y & 31) * 32 + (map_x & 31)) & 0x7fff;
+        self.vram[map_index]
     }
 
     fn bg_screen(&self, layer: usize) -> u8 {
@@ -1017,6 +1082,73 @@ mod tests {
         frame.fill(0);
         ppu.render_frame(&mut frame);
         assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+    }
+
+    #[test]
+    fn mode_two_uses_four_bpp_palettes_and_mode_two_priority() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 2;
+        ppu.bg1sc = 0x04;
+        ppu.bg2sc = 0x08;
+        ppu.bg12nba = 0x10; // BG1 at 0, BG2 at 0x1000.
+        ppu.cgram[21] = 0x03e0; // BG2 palette 1, color 5.
+        ppu.cgram[1] = 0x001f; // BG1 palette 0, color 1.
+
+        ppu.vram[0x0400] = 1 | (1 << 13);
+        ppu.vram[0x0800] = 1 | (1 << 10) | (1 << 13);
+        ppu.vram[0x0010] = 0x0080; // BG1 color 1.
+        ppu.vram[0x1010] = 0x0080; // BG2 color 1.
+        ppu.vram[0x1018] = 0x0080; // BG2 color 4, making color 5.
+        assert_eq!(ppu.bg_pixel_for_mode(1, 0, 0, true, 2), (21, true));
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.tm = 0x02;
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+
+        // BG1 high priority is in front of BG2 high priority in Mode 2.
+        ppu.tm = 0x03;
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+    }
+
+    #[test]
+    fn mode_two_applies_horizontal_and_vertical_offsets_per_column() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 2;
+        ppu.tm = 0x01;
+        ppu.bg1sc = 0x04;
+        ppu.bg12nba = 0x01; // BG1 tile data at 0x1000.
+        ppu.cgram[1] = 0x001f;
+        ppu.cgram[2] = 0x03e0;
+
+        // The sampled row of tile 1 is color 1 and the sampled row of tile 2
+        // is color 2.
+        ppu.vram[0x1010] = 0x00ff;
+        ppu.vram[0x1021] = 0x00ff;
+        ppu.vram[0x0400] = 1;
+        ppu.vram[0x0401] = 1;
+        ppu.vram[0x0402] = 2;
+        ppu.vram[0x0421] = 2;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+
+        // BG3 entry 0 applies to the second visible column.  The first
+        // visible column must remain under normal BG1 scrolling.
+        ppu.vram[0] = 0x2000 | 8; // Enable BG1 horizontal offset, HOFS = 8.
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[8], ppu.color_to_rgba(0x03e0));
+
+        // Replace the horizontal override with a vertical one.  At x=8 the
+        // second column now samples BG1 tilemap row 1 instead.
+        ppu.vram[0] = 0;
+        ppu.vram[0x20] = 0x2000 | 8;
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[8], ppu.color_to_rgba(0x03e0));
     }
 
     #[test]

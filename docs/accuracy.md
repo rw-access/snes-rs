@@ -136,23 +136,29 @@ implemented separately.
 ## Current implementation boundary
 
 The following have focused ordinary workspace tests. That evidence is narrower
-than corpus compatibility and must not be promoted to a ROM-suite pass:
+than corpus compatibility and must not be promoted to a ROM-suite or strict
+visual-acceptance pass:
 
 - 65816 state, a broad immediate/direct/absolute/long/indirect execution slice,
   stack/control flow, decimal ALU operations, block moves, interrupts, and
   ordered bus traces;
 - LoROM/HiROM loading, copier-header stripping, SRAM windows, WRAM mirrors,
   controller serial input, general DMA, and full-state rewind checkpoints;
-- PPU register latches, VRAM/CGRAM/OAM storage, deterministic Mode 0
-  background/OBJ composition, a bounded affine Mode 7 path, fixed-color math,
-  bounded frame execution, and tolerant frame comparison;
-- APU port/DSP-register state and an initial SPC700 execution subset.
+- PPU register latches, VRAM/CGRAM/OAM storage, focused Mode 0/Mode 1/Mode 2
+  tile and priority paths (including Mode 2 per-column offsets), a bounded
+  affine Mode 7 path, subscreen/fixed-color math, color-window cases, bounded
+  frame execution, and tolerant frame comparison;
+- console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
+  selected H/V timer register and IRQ paths;
+- APU port/DSP-register state and an initial SPC700 execution subset, including
+  selected word arithmetic and DIV overflow/zero-divisor edge cases.
 
 Remaining before claiming broad emulator compatibility: complete 65816 and
-SPC700 opcode coverage, scanline-level timing and HDMA, PPU windows and full
-Mode 7 edge behavior, scanline sprite limits, DSP voice mixing,
-enhancement-chip cartridges, JSON-vector execution, and pinned ROM
-expected-result plus visual golden runs. The
+SPC700 opcode coverage, cycle-accurate scanline timing, complete H/V timer and
+HDMA behavior, full PPU mode/priority/window and Mode 7 edge behavior,
+scanline sprite limits, DSP voice mixing, enhancement-chip cartridges,
+JSON-vector execution, and pinned ROM expected-result plus visual golden runs.
+The
 acceptance harness now has per-ROM descriptors, ROM/reference provenance,
 bounded execution, frame capture, deterministic replay, and diff artifacts;
 those mechanisms do not constitute a corpus pass until strict cases with valid

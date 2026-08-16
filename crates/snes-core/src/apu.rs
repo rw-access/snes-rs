@@ -894,21 +894,34 @@ impl Spc700 {
                 9
             }
             0x9e => {
-                let dividend = u16::from_le_bytes([self.a, self.y]);
+                // DIV is not a simple unsigned divide when YA/X does not
+                // fit in A.  This is the SPC700's documented overflow
+                // behavior, including the X=0 case.
+                let dividend = u32::from(u16::from_le_bytes([self.a, self.y]));
+                let divisor = u32::from(self.x);
                 let old_y = self.y;
-                if self.x == 0 {
-                    self.a = 0xff;
-                    self.y = 0xff;
-                    self.psw |= 0x40;
+                let (quotient, remainder) = if u32::from(old_y) < divisor * 2 {
+                    if divisor == 0 {
+                        (0xff, dividend & 0xff)
+                    } else {
+                        (dividend / divisor, dividend % divisor)
+                    }
                 } else {
-                    let quotient = dividend / u16::from(self.x);
-                    self.a = quotient as u8;
-                    self.y = (dividend % u16::from(self.x)) as u8;
-                    self.psw = (self.psw & !0x40) | if quotient > 0xff { 0x40 } else { 0 };
-                }
-                self.psw = (self.psw & !0x08)
+                    (
+                        0xff - (dividend - (divisor << 9)) / (256 - divisor),
+                        divisor + (dividend - (divisor << 9)) % (256 - divisor),
+                    )
+                };
+                self.a = quotient as u8;
+                self.y = remainder as u8;
+                self.psw = (self.psw & !0x48)
                     | if (self.x & 0x0f) <= (old_y & 0x0f) {
                         0x08
+                    } else {
+                        0
+                    }
+                    | if divisor == 0 || dividend / divisor > 0xff {
+                        0x40
                     } else {
                         0
                     };
@@ -1205,22 +1218,24 @@ impl Spc700 {
     }
 
     fn add_word(&mut self, left: u16, right: u16) {
-        let carry = u32::from(self.carry());
-        let sum = u32::from(left) + u32::from(right) + carry;
+        // ADDW starts a fresh word addition; the incoming C flag is not a
+        // carry-in (unlike ADC).  Carry is produced by the 16-bit result.
+        let sum = u32::from(left) + u32::from(right);
         let result = sum as u16;
         let overflow = (!(left ^ right) & (left ^ result) & 0x8000) != 0;
-        let half_carry = (left & 0x0fff) + (right & 0x0fff) + carry as u16 > 0x0fff;
+        let half_carry = (left & 0x0fff) + (right & 0x0fff) > 0x0fff;
         self.a = result as u8;
         self.y = (result >> 8) as u8;
         self.set_word_flags(result, sum > 0xffff, overflow, half_carry);
     }
 
     fn sub_word(&mut self, left: u16, right: u16) {
-        let borrow = i32::from(!self.carry());
-        let difference = i32::from(left) - i32::from(right) - borrow;
+        // SUBW also starts a fresh word operation; C is the result flag and
+        // does not provide an incoming borrow.
+        let difference = i32::from(left) - i32::from(right);
         let result = difference as u16;
         let overflow = ((left ^ right) & (left ^ result) & 0x8000) != 0;
-        let half_borrow = i32::from(left & 0x0fff) - i32::from(right & 0x0fff) - borrow < 0;
+        let half_borrow = i32::from(left & 0x0fff) - i32::from(right & 0x0fff) < 0;
         self.a = result as u8;
         self.y = (result >> 8) as u8;
         self.set_word_flags(result, difference >= 0, overflow, !half_borrow);
@@ -1696,6 +1711,54 @@ mod tests {
         assert_eq!(apu.ram[0x24], 0x35);
         assert_eq!(apu.ram[0x25], 0x12);
         assert_eq!(apu.spc700.a, 0xf9);
+    }
+
+    #[test]
+    fn spc700_word_add_and_sub_start_without_an_incoming_carry() {
+        let mut add = Apu::default();
+        add.spc700.a = 0xff;
+        add.spc700.y = 0x00;
+        add.ram[0x20] = 0x01;
+        add.ram[..3].copy_from_slice(&[0x80, 0x7a, 0x20]); // SETC; ADDW YA,$20
+        add.step_spc700();
+        add.step_spc700();
+        assert_eq!(
+            (u16::from(add.spc700.y) << 8) | u16::from(add.spc700.a),
+            0x0100
+        );
+
+        let mut sub = Apu::default();
+        sub.spc700.a = 0x00;
+        sub.spc700.y = 0x01;
+        sub.ram[0x20] = 0x01;
+        sub.ram[..3].copy_from_slice(&[0x9a, 0x20, 0xff]); // SUBW YA,$20; STOP
+        sub.step_spc700();
+        assert_eq!(
+            (u16::from(sub.spc700.y) << 8) | u16::from(sub.spc700.a),
+            0x00ff
+        );
+    }
+
+    #[test]
+    fn spc700_division_handles_overflow_and_zero_divisor_cases() {
+        let mut overflow = Apu::default();
+        overflow.spc700.a = 0x00;
+        overflow.spc700.y = 0x20;
+        overflow.spc700.x = 0x10;
+        overflow.ram[0] = 0x9e; // DIV YA,X: YA/X is outside A's range.
+        overflow.step_spc700();
+        assert_eq!(overflow.spc700.a, 0xff);
+        assert_eq!(overflow.spc700.y, 0x10);
+        assert_ne!(overflow.spc700.psw & 0x40, 0);
+
+        let mut zero_divisor = Apu::default();
+        zero_divisor.spc700.a = 0x34;
+        zero_divisor.spc700.y = 0x12;
+        zero_divisor.ram[0] = 0x9e;
+        zero_divisor.step_spc700();
+        assert_eq!(zero_divisor.spc700.a, 0xed);
+        assert_eq!(zero_divisor.spc700.y, 0x34);
+        assert_ne!(zero_divisor.spc700.psw & 0x40, 0);
     }
 
     #[test]
