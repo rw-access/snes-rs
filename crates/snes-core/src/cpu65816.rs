@@ -354,6 +354,54 @@ impl Cpu65816 {
                 }
                 cycles = 2 + u32::from(!self.accumulator_is_8_bit());
             }
+            0x05 | 0x25 | 0x45 | 0x65 | 0xc5 | 0xe5 | 0x0d | 0x2d | 0x4d | 0x6d | 0xcd
+            | 0xed | 0x0f | 0x2f | 0x4f | 0x6f | 0xcf | 0xef => {
+                let addressing = opcode & 0x0f;
+                let long = addressing == 0x0f;
+                let address = if long {
+                    self.long_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else if addressing == 0x0d {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.direct_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.accumulator_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                match opcode & 0xe0 {
+                    0x00 => self.logic_acc(value, |lhs, rhs| lhs | rhs),
+                    0x20 => self.logic_acc(value, |lhs, rhs| lhs & rhs),
+                    0x40 => self.logic_acc(value, |lhs, rhs| lhs ^ rhs),
+                    0x60 => self.adc(value),
+                    0xc0 => self.compare(self.state.a, value, self.accumulator_is_8_bit()),
+                    _ => self.sbc(value),
+                }
+                cycles = if long { 5 } else if addressing == 0x0d { 4 } else { 3 };
+            }
             0xc0 | 0xc9 | 0xe0 => {
                 let width = if opcode == 0xe0 {
                     self.index_is_8_bit()
@@ -489,7 +537,32 @@ impl Cpu65816 {
                 );
                 cycles = 3;
             }
-            0x8c | 0x8e | 0xac | 0xae => {
+            0xa4 | 0xa6 => {
+                let address = self.direct_address(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let value = self.read_value(
+                    bus,
+                    address,
+                    self.index_is_8_bit(),
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                if opcode == 0xa4 {
+                    self.state.y = self.set_index_width(value);
+                } else {
+                    self.state.x = self.set_index_width(value);
+                }
+                self.set_zero_negative(value, self.index_is_8_bit());
+                cycles = 3;
+            }
+            0x8c | 0x8e | 0xac | 0xae | 0xad => {
                 let address = self.absolute_address(
                     bus,
                     &mut trace,
@@ -497,7 +570,7 @@ impl Cpu65816 {
                     &mut master_ticks,
                     &mut access_count,
                 );
-                if opcode == 0xac || opcode == 0xae {
+                if opcode == 0xac || opcode == 0xae || opcode == 0xad {
                     let value = self.read_value(
                         bus,
                         address,
@@ -509,10 +582,15 @@ impl Cpu65816 {
                     );
                     if opcode == 0xac {
                         self.state.y = self.set_index_width(value);
-                    } else {
+                    } else if opcode == 0xae {
                         self.state.x = self.set_index_width(value);
+                    } else {
+                        self.set_accumulator(value);
+                        self.set_zero_negative(value, self.accumulator_is_8_bit());
                     }
-                    self.set_zero_negative(value, self.index_is_8_bit());
+                    if opcode != 0xad {
+                        self.set_zero_negative(value, self.index_is_8_bit());
+                    }
                 } else {
                     let value = if opcode == 0x8c { self.state.y } else { self.state.x };
                     self.write_value(
@@ -525,7 +603,7 @@ impl Cpu65816 {
                         &mut access_count,
                     );
                 }
-                cycles = 4;
+                cycles = if opcode == 0xad { 4 } else { 4 };
             }
             0xaf => {
                 let address = self.long_address(
@@ -907,12 +985,29 @@ impl Cpu65816 {
         let lhs = u32::from(self.state.a & mask as u16);
         let rhs = u32::from(value & mask as u16);
         let carry = u32::from(self.state.status & FLAG_CARRY != 0);
-        let result = lhs + rhs + carry;
-        let truncated = result & mask;
+        let binary_result = lhs + rhs + carry;
+        let (truncated, decimal_carry) = if self.state.status & 0x08 != 0 {
+            let mut decimal = lhs + rhs + carry;
+            let mut shift = 0;
+            while shift < width {
+                let nibble = ((decimal >> shift) & 0x0f) as u8;
+                if nibble > 9 {
+                    decimal += 6 << shift;
+                }
+                shift += 4;
+            }
+            (decimal & mask, decimal > mask)
+        } else {
+            (binary_result & mask, binary_result > mask)
+        };
         let sign = 1u32 << (width - 1);
         self.state.status = (self.state.status & !(FLAG_CARRY | FLAG_OVERFLOW))
-            | if result > mask { FLAG_CARRY } else { 0 }
-            | if (!(lhs ^ rhs) & (lhs ^ truncated) & sign) != 0 {
+            | if decimal_carry {
+                FLAG_CARRY
+            } else {
+                0
+            }
+            | if (!(lhs ^ rhs) & (lhs ^ (binary_result & mask)) & sign) != 0 {
                 FLAG_OVERFLOW
             } else {
                 0
@@ -927,12 +1022,40 @@ impl Cpu65816 {
         let lhs = u32::from(self.state.a & mask as u16);
         let rhs = u32::from(value & mask as u16);
         let borrow = u32::from(self.state.status & FLAG_CARRY == 0);
-        let result = lhs.wrapping_sub(rhs).wrapping_sub(borrow);
-        let truncated = result & mask;
+        let binary_result = lhs.wrapping_sub(rhs).wrapping_sub(borrow);
+        let truncated = if self.state.status & 0x08 != 0 {
+            let mut decimal = 0u32;
+            let mut borrow_digit = borrow;
+            let mut shift = 0;
+            while shift < width {
+                let left = ((lhs >> shift) & 0x0f) as i32;
+                let right = ((rhs >> shift) & 0x0f) as i32;
+                let mut digit = left - right - borrow_digit as i32;
+                if digit < 0 {
+                    digit += 10;
+                    borrow_digit = 1;
+                } else {
+                    borrow_digit = 0;
+                }
+                decimal |= (digit as u32) << shift;
+                shift += 4;
+            }
+            decimal
+        } else {
+            binary_result & mask
+        };
         let sign = 1u32 << (width - 1);
         self.state.status = (self.state.status & !(FLAG_CARRY | FLAG_OVERFLOW))
-            | if lhs >= rhs + borrow { FLAG_CARRY } else { 0 }
-            | if ((lhs ^ truncated) & (lhs ^ rhs) & sign) != 0 {
+            | if if self.state.status & 0x08 != 0 {
+                lhs >= rhs + borrow
+            } else {
+                lhs >= rhs + borrow
+            } {
+                FLAG_CARRY
+            } else {
+                0
+            }
+            | if ((lhs ^ (binary_result & mask)) & (lhs ^ rhs) & sign) != 0 {
                 FLAG_OVERFLOW
             } else {
                 0
@@ -1393,5 +1516,34 @@ mod tests {
         assert_eq!(cpu.state().pc, 0x0005);
         cpu.step_with_bus(&mut bus, None);
         assert_eq!(cpu.state().a & 0xff, 0x00);
+    }
+
+    #[test]
+    fn decimal_adc_uses_bcd_digits_and_carry() {
+        let mut bus = FlatBus::new();
+        bus.memory[..8].copy_from_slice(&[0xf8, 0x18, 0xa9, 0x09, 0x69, 0x01, 0xea, 0xea]);
+        let mut cpu = Cpu65816::default();
+        for _ in 0..5 {
+            cpu.step_with_bus(&mut bus, None);
+        }
+        assert_eq!(cpu.state().a & 0xff, 0x10);
+        assert_eq!(cpu.state().status & FLAG_CARRY, 0);
+    }
+
+    #[test]
+    fn direct_and_absolute_load_families_use_the_data_bank() {
+        let mut bus = FlatBus::new();
+        bus.memory[0] = 0xa5;
+        bus.memory[1] = 0x10;
+        bus.memory[2] = 0xad;
+        bus.memory[3] = 0x34;
+        bus.memory[4] = 0x12;
+        bus.memory[0x10] = 0x21;
+        bus.memory[0x1234] = 0x43;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x21);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().a & 0xff, 0x43);
     }
 }
