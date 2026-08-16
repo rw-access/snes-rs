@@ -25,6 +25,7 @@ const WINDOW_WIDTH: u32 = 256 * SCALE as u32;
 const WINDOW_HEIGHT: u32 = 224 * SCALE as u32;
 const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const AUDIO_QUEUE_CAPACITY: usize = AUDIO_SAMPLE_RATE as usize * 2;
+const AUDIO_PREFILL_FRAMES: usize = 3;
 
 const B: u16 = 1 << 0;
 const Y: u16 = 1 << 1;
@@ -72,16 +73,25 @@ impl AudioQueue {
         }
     }
 
+    fn queued_frames(&self) -> usize {
+        self.samples
+            .lock()
+            .map(|queue| queue.len() / 2)
+            .unwrap_or(0)
+    }
+
     fn fill(&self, output: &mut [f32], channels: usize) {
         if let Ok(mut queue) = self.samples.lock() {
-            for frame in output.chunks_mut(channels) {
+            for frame in output.chunks_mut(channels.max(1)) {
                 let left = queue.pop_front().unwrap_or(0.0);
                 let right = queue.pop_front().unwrap_or(left);
-                if let Some(channel) = frame.get_mut(0) {
-                    *channel = left;
-                }
-                for channel in frame.iter_mut().skip(1) {
-                    *channel = right;
+                if channels == 1 {
+                    frame[0] = (left + right) * 0.5;
+                } else {
+                    frame[0] = left;
+                    for channel in frame.iter_mut().skip(1) {
+                        *channel = right;
+                    }
                 }
             }
         } else {
@@ -121,11 +131,23 @@ impl AudioOutput {
             |error| eprintln!("audio stream error: {error}"),
             None,
         )?;
-        stream.play()?;
         Ok(Self {
             queue,
             _stream: stream,
         })
+    }
+
+    fn start(&self) -> Result<(), Box<dyn Error>> {
+        self._stream.play()?;
+        Ok(())
+    }
+
+    fn pause(&self) {
+        let _ = self._stream.pause();
+    }
+
+    fn queued_frames(&self) -> usize {
+        self.queue.queued_frames()
     }
 }
 
@@ -149,6 +171,7 @@ struct App {
     audio_samples_emitted: u64,
     next_frame_at: Instant,
     fps_throttled: bool,
+    audio_started: bool,
 }
 
 impl App {
@@ -168,6 +191,7 @@ impl App {
             audio_samples_emitted: 0,
             next_frame_at: Instant::now(),
             fps_throttled: true,
+            audio_started: false,
         }
     }
 
@@ -177,7 +201,10 @@ impl App {
         }
         self.rewinding = rewinding;
         self.audio.queue.flush();
-        if !rewinding {
+        if rewinding {
+            self.audio.pause();
+            self.audio_started = false;
+        } else {
             self.console
                 .set_controller_buttons(ControllerPort::Port1, self.buttons);
         }
@@ -205,6 +232,14 @@ impl App {
                 stereo.push(f32::from(sample.right) / 32_768.0);
             }
             self.audio.queue.enqueue(&stereo);
+            if !self.audio_started
+                && self.audio.queued_frames()
+                    >= (AUDIO_SAMPLE_RATE as usize / 60) * AUDIO_PREFILL_FRAMES
+            {
+                if self.audio.start().is_ok() {
+                    self.audio_started = true;
+                }
+            }
         }
 
         let frame = self.console.next_frame();

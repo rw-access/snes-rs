@@ -6,6 +6,7 @@ use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
+use sdl2::rect::Rect;
 use snes_core::{
     Console, ControllerPort, RewindBuffer, RomImage, AUDIO_SAMPLE_RATE, MASTER_TICKS_PER_FRAME,
 };
@@ -23,6 +24,9 @@ const A: u16 = 1 << 8;
 const X: u16 = 1 << 9;
 const L: u16 = 1 << 10;
 const R: u16 = 1 << 11;
+const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / 60);
+const AUDIO_PREFILL_SAMPLES: usize = (AUDIO_SAMPLE_RATE as usize / 20) * 2;
+const AUDIO_MAX_SAMPLES: usize = (AUDIO_SAMPLE_RATE as usize / 12) * 2;
 
 fn button(key: Keycode) -> Option<u16> {
     Some(match key {
@@ -43,7 +47,7 @@ fn button(key: Keycode) -> Option<u16> {
 }
 
 fn audio_block(console: &mut Console, frame: u64, emitted: &mut u64) -> Vec<f32> {
-    let target = frame * u64::from(AUDIO_SAMPLE_RATE) / 60;
+    let target = frame.saturating_mul(u64::from(AUDIO_SAMPLE_RATE)) / 60;
     let count = target.saturating_sub(*emitted) as usize;
     *emitted = target;
     let samples = console.render_audio(count);
@@ -53,6 +57,10 @@ fn audio_block(console: &mut Console, frame: u64, emitted: &mut u64) -> Vec<f32>
         output.push(f32::from(sample.right) / 32_768.0);
     }
     output
+}
+
+fn queued_samples(queue: &AudioQueue<f32>) -> usize {
+    queue.size() as usize / std::mem::size_of::<f32>()
 }
 
 fn main() -> Result<(), String> {
@@ -96,13 +104,14 @@ fn main() -> Result<(), String> {
     let audio_queue: AudioQueue<f32> = audio
         .open_queue(None, &desired)
         .map_err(|error| error.to_string())?;
-    audio_queue.resume();
+    audio_queue.pause();
     let mut events = sdl.event_pump().map_err(|error| error.to_string())?;
     let mut rewind = RewindBuffer::new(600);
     let mut buttons = 0u16;
     let mut rewinding = false;
     let mut frame_number = 0u64;
     let mut audio_emitted = 0u64;
+    let mut audio_started = false;
     let mut last_frame = Instant::now();
     'running: loop {
         for event in events.poll_iter() {
@@ -119,7 +128,9 @@ fn main() -> Result<(), String> {
                     ..
                 } => {
                     rewinding = true;
+                    audio_queue.pause();
                     audio_queue.clear();
+                    audio_started = false;
                 }
                 Event::KeyUp {
                     keycode: Some(Keycode::R),
@@ -147,16 +158,23 @@ fn main() -> Result<(), String> {
                 } => {
                     buttons = 0;
                     rewinding = false;
+                    audio_queue.pause();
+                    audio_queue.clear();
+                    audio_started = false;
+                    console.set_controller_buttons(ControllerPort::Port1, 0);
                 }
                 _ => {}
             }
         }
-        if last_frame.elapsed() >= Duration::from_nanos(1_000_000_000 / 60) {
-            last_frame = Instant::now();
+        if last_frame.elapsed() >= FRAME_DURATION {
+            last_frame += FRAME_DURATION;
+            if last_frame < Instant::now() {
+                last_frame = Instant::now();
+            }
             if rewinding {
                 if rewind.rewind(&mut console).unwrap_or(false) {
                     frame_number = frame_number.saturating_sub(1);
-                    audio_emitted = frame_number * u64::from(AUDIO_SAMPLE_RATE) / 60;
+                    audio_emitted = frame_number.saturating_mul(u64::from(AUDIO_SAMPLE_RATE)) / 60;
                 }
             } else {
                 rewind.capture(&console);
@@ -166,6 +184,16 @@ fn main() -> Result<(), String> {
                 audio_queue
                     .queue_audio(&audio_block(&mut console, frame_number, &mut audio_emitted))
                     .map_err(|error| error.to_string())?;
+                if !audio_started {
+                    if queued_samples(&audio_queue) >= AUDIO_PREFILL_SAMPLES {
+                        audio_queue.resume();
+                        audio_started = true;
+                    }
+                } else {
+                    while queued_samples(&audio_queue) > AUDIO_MAX_SAMPLES {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
             }
 
             let frame = console.next_frame();
@@ -186,8 +214,22 @@ fn main() -> Result<(), String> {
                 .update(None, &rgb, width as usize * 3)
                 .map_err(|error| error.to_string())?;
             canvas.clear();
+            let (output_width, output_height) =
+                canvas.output_size().map_err(|error| error.to_string())?;
+            let scale = SCALE
+                .min(output_width / width)
+                .min(output_height / height)
+                .max(1);
+            let destination_width = width.saturating_mul(scale);
+            let destination_height = height.saturating_mul(scale);
+            let destination = Rect::new(
+                ((output_width.saturating_sub(destination_width)) / 2) as i32,
+                ((output_height.saturating_sub(destination_height)) / 2) as i32,
+                destination_width,
+                destination_height,
+            );
             canvas
-                .copy(&texture, None, None)
+                .copy(&texture, None, Some(destination))
                 .map_err(|error| error.to_string())?;
             canvas.present();
         } else {
