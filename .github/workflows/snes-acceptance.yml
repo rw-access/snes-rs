@@ -2,6 +2,7 @@ name: SNES acceptance
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     paths:
       - ".github/workflows/snes-acceptance.yml"
@@ -26,12 +27,18 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Run workspace checks
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace
+
       - name: Fetch pinned test corpus
         run: python3 scripts/fetch_snes_test_roms.py
 
       - name: Run strict acceptance cases
         env:
           SNES_RUN_ACCEPTANCE: "1"
+          SNES_HIRES_CORPUS_ROM: tests/snes-test-roms/materialized/peterlemon-snes/PPU/Mosaic/Mode5/MosaicMode5.sfc
         run: cargo test -p snes-render --test acceptance -- --nocapture
 
       - name: Verify corpus capability inventory

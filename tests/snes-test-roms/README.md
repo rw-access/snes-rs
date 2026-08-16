@@ -111,6 +111,15 @@ offline and corpus-independent:
 SNES_RUN_ACCEPTANCE=1 cargo test -p snes-render --test acceptance
 ```
 
+The native Mode 5 surface can be checked against a materialized PeterLemon ROM
+without enabling a 512x448 visual gate (the latter also requires interlace
+field assembly):
+
+```sh
+SNES_HIRES_CORPUS_ROM=tests/snes-test-roms/materialized/peterlemon-snes/PPU/Mosaic/Mode5/MosaicMode5.sfc \
+  cargo test -p snes-render --test acceptance materialized_mode5_corpus_rom_reports_native_hires_dimensions
+```
+
 Each case records its source ID, immutable source revision, ROM SHA-256,
 execution bound, capture frame, reference dimensions/format, tolerance, mask,
 and artifact name. A strict case exits nonzero on a missing reference or frame
@@ -154,11 +163,12 @@ one file-count or exit-status check:
 | Material | Correct oracle |
 | --- | --- |
 | SingleStepTests `v1/*.json` | Initial/final CPU state, memory, and the applicable bus-access sequence. |
-| PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. Ten 256x224 PPU pairs are strict exact-match gates (zero tolerance, empty masks); captures requiring 512x448/interlace output or unsupported reference formats remain diagnostic. |
+| PeterLemon CPU/PPU `.sfc` plus matching `.png` | The ROM's documented completion/result plus a captured frame compared with its matching lossless reference. Eleven 256x224 pairs (ten PPU captures plus CPU MOV) are strict exact-match gates (zero tolerance, empty masks); captures requiring 512x448/interlace output or unsupported reference formats remain diagnostic. |
 | higan `.sfc`/`.smc` hardware tests | A case-specific memory, register, timing, audio, or visual oracle taken from the upstream documentation. The acceptance harness supports an explicit `memory-byte` protocol for tests such as absindx's `$000000` result byte (`0=running`, `1=passed`, `255=failed`) and gilyon's SPC700 port `$2140` result (`0=running`, `1=passed`, `2=failed`). |
 
-The currently enabled suite contains eleven strict cases: the ten exact
-PeterLemon PPU captures plus gilyon's documented SPC700 instruction-suite ROM.
+The currently enabled suite contains twelve strict cases: eleven exact
+PeterLemon captures (ten PPU captures plus CPU MOV) plus gilyon's documented
+SPC700 instruction-suite ROM.
 The latter publishes success briefly before returning to the IPL; the harness
 latches the passing result at the instruction that reports it.
 

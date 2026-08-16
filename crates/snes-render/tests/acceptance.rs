@@ -1,6 +1,9 @@
 use std::{env, path::PathBuf};
 
-use snes_render::{AcceptanceManifest, AcceptanceRunner, CaseStatus};
+use snes_core::MappingMode;
+use snes_render::{
+    AcceptanceManifest, AcceptanceRunner, CaseStatus, HeadlessRunner, RomTestDescriptor,
+};
 
 #[test]
 fn enabled_snes_acceptance_cases() {
@@ -29,4 +32,36 @@ fn enabled_snes_acceptance_cases() {
             report.message
         );
     }
+}
+
+#[test]
+fn materialized_mode5_corpus_rom_reports_native_hires_dimensions() {
+    let Some(path) = env::var_os("SNES_HIRES_CORPUS_ROM") else {
+        eprintln!(
+            "skipping native hires corpus check; set SNES_HIRES_CORPUS_ROM to a PeterLemon Mode 5 ROM"
+        );
+        return;
+    };
+
+    let runner = HeadlessRunner::new(RomTestDescriptor {
+        mapping: Some(MappingMode::LoRom),
+        max_frames: Some(5),
+        ..RomTestDescriptor::default()
+    });
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path)
+    };
+    let mut console = runner
+        .load_path(&path)
+        .unwrap_or_else(|error| panic!("could not load hires corpus ROM: {error:?}"));
+    runner.run(&mut console);
+    let frame = console.next_frame();
+
+    assert_eq!((frame.width, frame.height), (512, 224));
+    assert_eq!(frame.pixels.len(), 512 * 224);
 }

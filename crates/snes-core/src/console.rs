@@ -53,7 +53,9 @@ impl Console {
             dma: Dma::default(),
             controller: ControllerPorts::default(),
             timing: TimingState::default(),
-            framebuffer: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT],
+            // Keep enough storage for the native 512-wide Modes 5/6 output;
+            // ordinary modes still expose the existing 256x224 frame.
+            framebuffer: vec![0; SCREEN_WIDTH * 2 * SCREEN_HEIGHT],
             apu: Apu::default(),
         })
     }
@@ -317,11 +319,13 @@ impl Console {
 
     /// Produces the next video frame.
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
-        self.ppu.render_frame(&mut self.framebuffer);
+        let (width, height) = self.ppu.native_dimensions();
+        self.framebuffer.resize(width * height, 0);
+        self.ppu.render_frame_native(&mut self.framebuffer);
         FrameOutput {
             pixels: &self.framebuffer,
-            width: SCREEN_WIDTH as u16,
-            height: SCREEN_HEIGHT as u16,
+            width: width as u16,
+            height: height as u16,
         }
     }
 
@@ -646,6 +650,25 @@ mod tests {
     fn unmapped_low_bus_addresses_do_not_underflow_apu_port_decode() {
         assert_eq!(apu_port(0x000000), None);
         assert_eq!(apu_port(0x002140), Some(0));
+    }
+
+    #[test]
+    fn next_frame_uses_native_hires_dimensions_without_changing_baseline_modes() {
+        let mut console = Console::new(RomImage::new(vec![0; 0x8000])).unwrap();
+
+        let baseline = console.next_frame();
+        assert_eq!((baseline.width, baseline.height), (256, 224));
+        assert_eq!(baseline.pixels.len(), 256 * 224);
+
+        console.ppu.bgmode = 5;
+        let hires = console.next_frame();
+        assert_eq!((hires.width, hires.height), (512, 224));
+        assert_eq!(hires.pixels.len(), 512 * 224);
+
+        console.ppu.bgmode = 0;
+        let baseline_again = console.next_frame();
+        assert_eq!((baseline_again.width, baseline_again.height), (256, 224));
+        assert_eq!(baseline_again.pixels.len(), 256 * 224);
     }
 
     #[test]

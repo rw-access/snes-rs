@@ -3,6 +3,7 @@
 /// The visible SNES frame used by the headless renderer.
 pub const SCREEN_WIDTH: usize = 256;
 pub const SCREEN_HEIGHT: usize = 224;
+pub const HIRES_SCREEN_WIDTH: usize = SCREEN_WIDTH * 2;
 
 /// State for the registers and memory directly owned by the two PPUs.
 ///
@@ -279,12 +280,46 @@ impl Ppu {
         }
     }
 
-    /// Renders a deterministic, non-interlaced frame.
+    /// Returns the native visible dimensions for the active PPU mode.
+    ///
+    /// Modes 5 and 6 have 512 horizontal pixels.  Interlace and overscan are
+    /// intentionally not included until the scanline/field scheduler can
+    /// provide the required timing boundary.
+    pub const fn native_dimensions(&self) -> (usize, usize) {
+        if matches!(self.bgmode & 0x07, 5 | 6) {
+            (HIRES_SCREEN_WIDTH, SCREEN_HEIGHT)
+        } else {
+            (SCREEN_WIDTH, SCREEN_HEIGHT)
+        }
+    }
+
+    /// Renders the legacy 256x224 frame used by existing callers.
+    ///
+    /// Modes 5 and 6 retain their historical deterministic downsample here;
+    /// use [`Self::render_frame_native`] when the native 512-pixel output is
+    /// required.
     ///
     /// Mode 0 has four 2bpp backgrounds.  Keeping the renderer pixel based
     /// makes its priority behavior explicit and gives visual tests a stable
     /// seam while scanline timing is added to the machine clock.
     pub fn render_frame(&mut self, pixels: &mut [u32]) {
+        self.render_frame_at_width(pixels, SCREEN_WIDTH);
+    }
+
+    /// Renders the active mode at its native visible width.
+    ///
+    /// The output slice must contain exactly `width * SCREEN_HEIGHT` pixels,
+    /// where `width` is [`Self::native_dimensions`].  The legacy render path
+    /// remains available so existing 256x224 consumers and golden gates do
+    /// not change behavior.
+    pub fn render_frame_native(&mut self, pixels: &mut [u32]) {
+        let (width, height) = self.native_dimensions();
+        debug_assert_eq!(height, SCREEN_HEIGHT);
+        self.render_frame_at_width(pixels, width);
+    }
+
+    fn render_frame_at_width(&mut self, pixels: &mut [u32], width: usize) {
+        debug_assert_eq!(pixels.len(), width * SCREEN_HEIGHT);
         let backdrop = self.color_to_rgba(self.cgram[0]);
         pixels.fill(if self.inidisp & 0x80 != 0 {
             0xff00_0000
@@ -297,7 +332,7 @@ impl Ppu {
 
         match self.bgmode & 0x07 {
             0 | 1 | 2 | 3 | 4 => self.render_tile_mode(pixels, self.bgmode & 0x07),
-            5 | 6 => self.render_hires_tile_mode(pixels, self.bgmode & 0x07),
+            5 | 6 => self.render_hires_tile_mode(pixels, self.bgmode & 0x07, width),
             7 => self.render_mode7(pixels),
             _ => {}
         }
@@ -317,25 +352,26 @@ impl Ppu {
         }
     }
 
-    /// Renders Modes 5 and 6 through the existing 256-pixel framebuffer.
+    /// Renders Modes 5 and 6 at the requested width.
     ///
-    /// These modes produce 512 horizontal pixels on hardware.  The public
-    /// renderer currently exposes a 256-pixel surface, so each output pixel
-    /// samples the left member of one horizontal high-resolution pair.  The
-    /// tile and scroll coordinates remain high-resolution coordinates, which
-    /// preserves the important 16-pixel character pairing and makes this a
-    /// deterministic downsample boundary until a 512-wide video surface is
-    /// introduced.
-    fn render_hires_tile_mode(&self, pixels: &mut [u32], mode: u8) {
+    /// At 512 pixels this is the native horizontal output.  At 256 pixels,
+    /// each output pixel samples the left member of one high-resolution pair
+    /// for compatibility with the legacy framebuffer.  Tile and scroll
+    /// coordinates remain high-resolution coordinates in both paths.
+    fn render_hires_tile_mode(&self, pixels: &mut [u32], mode: u8, width: usize) {
         for y in 0..SCREEN_HEIGHT {
             let ppu_y = y + 1;
-            for x in 0..SCREEN_WIDTH {
-                let hires_x = x * 2;
+            for x in 0..width {
+                let hires_x = if width == HIRES_SCREEN_WIDTH {
+                    x
+                } else {
+                    x * 2
+                };
                 let main =
                     self.screen_pixel_at(hires_x, ppu_y, mode, self.tm, self.tmw, false, true);
                 let sub = self.screen_pixel_at(hires_x, ppu_y, mode, self.ts, self.tsw, true, true);
-                let color = self.compose_screens(main, sub, x);
-                pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
+                let color = self.compose_screens(main, sub, hires_x / 2);
+                pixels[y * width + x] = self.color_to_rgba(color);
             }
         }
     }
@@ -417,7 +453,8 @@ impl Ppu {
         }
 
         if layer_mask & 0x10 != 0 {
-            if let Some((color, priority, _oam_index)) = self.obj_pixel(x, y, window_mask) {
+            let obj_x = if hires { x / 2 } else { x };
+            if let Some((color, priority, _oam_index)) = self.obj_pixel(obj_x, y, window_mask) {
                 if priority > selected.priority {
                     selected = ScreenPixel {
                         color,
@@ -1609,6 +1646,34 @@ mod tests {
         frame.fill(0);
         ppu.render_frame(&mut frame);
         assert_eq!(frame[0], ppu.color_to_rgba(0x7c00));
+    }
+
+    #[test]
+    fn modes_five_and_six_expose_native_512_pixel_output() {
+        for mode in [5, 6] {
+            let mut ppu = Ppu::default();
+            ppu.inidisp = 0;
+            ppu.bgmode = mode;
+            ppu.tm = 0x01;
+            ppu.cgram[1] = 0x001f;
+            ppu.cgram[2] = 0x03e0;
+            ppu.vram[0] = 1;
+            ppu.vram[16] = 0x0080;
+            ppu.vram[32] = 0x8000;
+            ppu.vram[17] = 0x0080;
+            ppu.vram[33] = 0x8000;
+
+            assert_eq!(ppu.native_dimensions(), (HIRES_SCREEN_WIDTH, SCREEN_HEIGHT));
+            let mut frame = vec![0; HIRES_SCREEN_WIDTH * SCREEN_HEIGHT];
+            ppu.render_frame_native(&mut frame);
+
+            // The second 8-pixel tile begins at native x=8.  On the legacy
+            // 256-wide surface it begins at x=4 because that surface samples
+            // one member of each high-resolution pair.
+            assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+            assert_eq!(frame[4], ppu.color_to_rgba(0));
+            assert_eq!(frame[8], ppu.color_to_rgba(0x03e0));
+        }
     }
 
     #[test]

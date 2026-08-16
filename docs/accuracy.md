@@ -29,7 +29,7 @@ accepted according to their role:
 | Corpus material | Acceptance role | Required evidence | Current status |
 | --- | --- | --- | --- |
 | `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Optional runner passes all 50,800 selected vectors; bus-cycle records are parsed but intentionally not compared. |
-| `peterlemon-snes/CPUTest/CPU/*.sfc`, `PPU/**/*.sfc`, and `SPC700/**/*.sfc` with available fixtures | CPU/PPU/APU integration | Run the matching ROM to its documented result, capture a declared frame or audio result, and compare the matching lossless reference where an oracle is defined. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; ten 256x224 PeterLemon PPU PNG pairs are enabled strict gates with zero tolerance and empty masks. Other captures remain diagnostic when their dimensions, format, or modeled hardware behavior is outside the current baseline. |
+| `peterlemon-snes/CPUTest/CPU/*.sfc`, `PPU/**/*.sfc`, and `SPC700/**/*.sfc` with available fixtures | CPU/PPU/APU integration | Run the matching ROM to its documented result, capture a declared frame or audio result, and compare the matching lossless reference where an oracle is defined. | The optional acceptance runner decodes and compares PPM/ARGB32/PNG/JPEG references; eleven 256x224 PeterLemon PNG pairs (ten PPU captures plus CPU MOV) are enabled strict gates with zero tolerance and empty masks. Other captures remain diagnostic when their dimensions, format, or modeled hardware behavior is outside the current baseline. |
 | Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | The harness supports an explicit `memory-byte` protocol; only documented cases may use it. Other cases remain diagnostic. |
 | `.spc`, `.bin`, source files, and standalone image/audio fixtures | Subsystem fixture | Consume them only through the subsystem-specific harness that defines their format and oracle. | Must not be passed to the SNES boot-ROM runner as a suite. |
 
@@ -100,8 +100,9 @@ diff image together with case metadata under
 one-byte-per-pixel mask. The harness decodes binary P6 PPM, little-endian
 ARGB32, PNG, and JPEG references, with reference dimensions checked before
 comparison and supplied reference SHA-256 values checked before decoding. PNG
-chunk checksums are also verified by the PNG decoder. Ten pinned PeterLemon PPU
-captures are currently enabled strict golden gates: they match exactly at their
+chunk checksums are also verified by the PNG decoder. Eleven pinned PeterLemon
+PNG pairs (ten PPU captures plus CPU MOV) are currently enabled strict golden
+gates: they match exactly at their
 declared frames with zero tolerance and empty masks. The pinned gilyon SPC700
 ROM is also enabled as a strict result-protocol gate; it reports `$2140 = 1`
 after its documented instruction suite. Decoder support alone is
@@ -111,8 +112,11 @@ and a documented comparison contract.
 The harness proves determinism for these cases by running the same ROM and input
 sequence twice from reset and comparing the captured frame and relevant
 machine-state/result observation. `run_for_frames` plus `next_frame` remains an
-approximate frame-bound mechanism, so captures that require interlace, hires
-512x448 output, or exact scanline/VBlank synchronization remain diagnostic.
+approximate frame-bound mechanism, so captures that require interlace, overscan,
+hires 512x448 output, or exact scanline/VBlank synchronization remain
+diagnostic. Native 512x224 output is available for Modes 5/6; the 512x448
+PeterLemon captures combine hires with field/vertical presentation behavior
+that this scheduler does not yet model.
 
 ## Optional 65816 JSON-vector runner
 
@@ -167,7 +171,9 @@ visual-acceptance pass:
   paths, baseline OBJ range/time-over limits, DMA/HDMA VRAM word-port and
   transfer-pattern behavior, and tolerant frame comparison;
 - PPU `$2133` SETINI masking/write-only behavior and high-resolution scroll
-  granularity are covered by focused register tests;
+  granularity are covered by focused register tests; Modes 5/6 now expose a
+  native 512x224 frame through `Console::next_frame`, while the legacy direct
+  PPU render entry point remains 256x224 for existing callers;
 - console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
   selected H/V timer register and IRQ paths;
 - APU port/DSP-register state and the gilyon SPC700 instruction-suite gate,
