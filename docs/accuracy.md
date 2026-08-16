@@ -140,29 +140,32 @@ than corpus compatibility and must not be promoted to a ROM-suite or strict
 visual-acceptance pass:
 
 - 65816 state, a broad immediate/direct/absolute/long/indirect execution slice,
-  including emulation-mode direct-indexed-indirect address wrapping, stack/
-  control flow, decimal ALU operations, block moves, interrupts, and ordered
-  bus traces;
+  including emulation-mode direct-indexed-indirect address wrapping, indexed
+  data-bank carry behavior, program-bank jump-table pointers, stack/control
+  flow, decimal ALU operations, block moves, interrupts, and ordered bus
+  traces;
 - LoROM/HiROM loading, copier-header stripping, SRAM windows, WRAM mirrors,
   controller serial input, general DMA, and full-state rewind checkpoints;
 - PPU register latches, VRAM/CGRAM/OAM storage, focused Mode 0/Mode 1/Mode 2
   tile and priority paths (including Mode 2 per-column offsets), a bounded Mode
   3 path covering BG1 8bpp, BG2 4bpp, and modeled priority ordering, a bounded
   affine Mode 7 path, subscreen/fixed-color math, color-window cases, bounded
-  frame execution, packed 2/4/8bpp tile decoding, DMA/HDMA VRAM word-port
-  patterns, and tolerant frame comparison;
+  frame execution, packed 2/4/8bpp tile decoding, Modes 4–6, direct-color
+  paths, DMA/HDMA VRAM word-port patterns, and tolerant frame comparison;
 - console scanline scheduling, HBlank/VBlank status, VBlank/NMI delivery, and
   selected H/V timer register and IRQ paths;
 - APU port/DSP-register state and an initial SPC700 execution subset, including
   the `$F0-$FF` I/O overlay, DSP address/data access, timer dividers and
-  read-clear outputs, IPL entry state, and selected word arithmetic with
-  full-word zero/negative flags for word load/increment/decrement operations
-  and DIV overflow/zero-divisor edge cases.
+  read-clear outputs, IPL entry state, BRR decoding, bounded eight-voice
+  mixing, console audio output, and selected word arithmetic with full-word
+  zero/negative flags for word load/increment/decrement operations and DIV
+  overflow/zero-divisor edge cases.
 
 Remaining before claiming broad emulator compatibility: complete 65816 and
 SPC700 opcode coverage, cycle-accurate scanline timing, complete H/V timer and
 HDMA behavior, full PPU mode/priority/window and Mode 7 edge behavior,
-scanline sprite limits, DSP voice mixing, enhancement-chip cartridges,
+scanline sprite limits, exact DSP envelope/interpolation/noise/echo behavior,
+enhancement-chip cartridges,
 JSON-vector execution, and pinned ROM expected-result plus visual golden runs.
 The
 acceptance harness now has per-ROM descriptors, ROM/reference provenance,

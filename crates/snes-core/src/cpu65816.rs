@@ -401,9 +401,10 @@ impl Cpu65816 {
                     &mut access_count,
                 );
                 let pointer = pointer.wrapping_add(self.state.x);
+                let pointer_bank = u32::from(self.state.program_bank) << 16;
                 let lo = self.read(
                     bus,
-                    Address24::new(u32::from(pointer)),
+                    Address24::new(pointer_bank | u32::from(pointer)),
                     BusAccessKind::DataRead,
                     &mut trace,
                     &mut cycles,
@@ -412,7 +413,7 @@ impl Cpu65816 {
                 );
                 let hi = self.read(
                     bus,
-                    Address24::new(u32::from(pointer.wrapping_add(1))),
+                    Address24::new(pointer_bank | u32::from(pointer.wrapping_add(1))),
                     BusAccessKind::DataRead,
                     &mut trace,
                     &mut cycles,
@@ -488,13 +489,9 @@ impl Cpu65816 {
                 cycles = 8;
             }
             0x44 | 0x54 => {
-                let source_bank = self.fetch_byte(
-                    bus,
-                    &mut trace,
-                    &mut cycles,
-                    &mut master_ticks,
-                    &mut access_count,
-                );
+                // The encoded operands are destination bank, then source bank.
+                // The instruction repeats until the 16-bit accumulator wraps
+                // from zero to $ffff, transferring one byte per repetition.
                 let destination_bank = self.fetch_byte(
                     bus,
                     &mut trace,
@@ -502,8 +499,15 @@ impl Cpu65816 {
                     &mut master_ticks,
                     &mut access_count,
                 );
-                let count = u32::from(self.state.a).wrapping_add(1);
-                for _ in 0..count {
+                let source_bank = self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let mut transferred = 0u32;
+                loop {
                     let source =
                         Address24::new((u32::from(source_bank) << 16) | u32::from(self.state.x));
                     let destination = Address24::new(
@@ -534,10 +538,14 @@ impl Cpu65816 {
                         self.state.x = self.state.x.wrapping_sub(1);
                         self.state.y = self.state.y.wrapping_sub(1);
                     }
+                    self.state.a = self.state.a.wrapping_sub(1);
+                    transferred += 1;
+                    if self.state.a == 0xffff {
+                        break;
+                    }
                 }
-                self.state.a = 0xffff;
                 self.state.data_bank = destination_bank;
-                cycles = 7;
+                cycles = 7 * transferred;
             }
             0x40 => {
                 self.state.status =
@@ -2189,7 +2197,7 @@ impl Cpu65816 {
         let rhs = u32::from(value & mask as u16);
         let borrow = u32::from(self.state.status & FLAG_CARRY == 0);
         let binary_result = lhs.wrapping_sub(rhs).wrapping_sub(borrow);
-        let truncated = if self.state.status & 0x08 != 0 {
+        let (truncated, decimal_carry) = if self.state.status & 0x08 != 0 {
             let mut decimal = 0u32;
             let mut borrow_digit = borrow;
             let mut shift = 0;
@@ -2198,29 +2206,21 @@ impl Cpu65816 {
                 let right = ((rhs >> shift) & 0x0f) as i32;
                 let mut digit = left - right - borrow_digit as i32;
                 if digit < 0 {
-                    digit -= 6;
+                    digit += 10;
                     borrow_digit = 1;
                 } else {
                     borrow_digit = 0;
                 }
-                decimal |= (digit as u32) << shift;
+                decimal |= ((digit as u32) & 0x0f) << shift;
                 shift += 4;
             }
-            decimal
+            (decimal & mask, borrow_digit == 0)
         } else {
-            binary_result & mask
+            (binary_result & mask, binary_result <= mask)
         };
         let sign = 1u32 << (width - 1);
         self.state.status = (self.state.status & !(FLAG_CARRY | FLAG_OVERFLOW))
-            | if if self.state.status & 0x08 != 0 {
-                lhs >= rhs + borrow
-            } else {
-                lhs >= rhs + borrow
-            } {
-                FLAG_CARRY
-            } else {
-                0
-            }
+            | if decimal_carry { FLAG_CARRY } else { 0 }
             | if ((lhs ^ (binary_result & mask)) & (lhs ^ rhs) & sign) != 0 {
                 FLAG_OVERFLOW
             } else {
@@ -2327,7 +2327,9 @@ impl Cpu65816 {
     ) -> Address24 {
         let offset = self.fetch_word(bus, trace, cycles, ticks, count);
         Address24::new(
-            (u32::from(self.state.data_bank) << 16) | u32::from(offset.wrapping_add(index)),
+            (u32::from(self.state.data_bank) << 16)
+                .wrapping_add(u32::from(offset))
+                .wrapping_add(u32::from(index)),
         )
     }
 
@@ -2965,6 +2967,22 @@ mod tests {
     }
 
     #[test]
+    fn decimal_sbc_masks_adjusted_nibbles_and_preserves_upper_accumulator() {
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0xe9, 0xd7]);
+        let mut cpu = Cpu65816::default();
+        cpu.state.a = 0xd6f1;
+        cpu.state.status |= FLAG_CARRY | 0x08;
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().a, 0xd614);
+        assert_ne!(cpu.state().status & FLAG_CARRY, 0);
+        assert_eq!(cpu.state().status & FLAG_NEGATIVE, 0);
+        assert_eq!(cpu.state().status & FLAG_OVERFLOW, 0);
+    }
+
+    #[test]
     fn direct_and_absolute_load_families_use_the_data_bank() {
         let mut bus = FlatBus::new();
         bus.memory[0] = 0xa5;
@@ -3069,19 +3087,44 @@ mod tests {
     #[test]
     fn mvn_copies_a_plus_one_bytes_and_updates_banks() {
         let mut bus = FlatBus::new();
-        bus.memory[..3].copy_from_slice(&[0x54, 0x00, 0x02]);
+        bus.memory[..3].copy_from_slice(&[0x54, 0x02, 0x00]);
         bus.memory[0x0100] = 0xaa;
         bus.memory[0x0101] = 0xbb;
         let mut cpu = Cpu65816::default();
         cpu.state.a = 1;
         cpu.state.x = 0x0100;
         cpu.state.y = 0x0200;
-        cpu.step_with_bus(&mut bus, None);
+        let step = cpu.step_with_bus(&mut bus, None);
         assert_eq!(&bus.memory[0x020200..0x020202], &[0xaa, 0xbb]);
         assert_eq!(cpu.state().a, 0xffff);
         assert_eq!(cpu.state().x, 0x0102);
         assert_eq!(cpu.state().y, 0x0202);
         assert_eq!(cpu.state().data_bank, 2);
+        assert_eq!(step.cycles, 14);
+    }
+
+    #[test]
+    fn jsr_absolute_indexed_reads_pointer_from_program_bank() {
+        let mut bus = FlatBus::new();
+        bus.memory[0x128000..0x128003].copy_from_slice(&[0xfc, 0x00, 0x20]);
+        bus.memory[0x122001] = 0x78;
+        bus.memory[0x122002] = 0x56;
+        let mut cpu = Cpu65816::default();
+        cpu.restore(CpuState {
+            pc: 0x8000,
+            sp: 0x01ff,
+            program_bank: 0x12,
+            x: 1,
+            status: FLAG_MEMORY | FLAG_INDEX,
+            emulation_mode: true,
+            ..CpuState::default()
+        });
+
+        cpu.step_with_bus(&mut bus, None);
+
+        assert_eq!(cpu.state().pc, 0x5678);
+        assert_eq!(bus.memory[0x01ff], 0x80);
+        assert_eq!(bus.memory[0x01fe], 0x02);
     }
 
     #[test]
@@ -3230,7 +3273,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_data_addressing_wraps_within_the_data_bank() {
+    fn indexed_data_addressing_carries_into_the_next_data_bank() {
         let mut bus = FlatBus::new();
         bus.memory[..3].copy_from_slice(&[0x99, 0xff, 0xff]);
         let mut cpu = Cpu65816::default();
@@ -3243,7 +3286,7 @@ mod tests {
 
         cpu.step_with_bus(&mut bus, None);
 
-        assert_eq!(bus.memory[0x010000], 0x5a);
+        assert_eq!(bus.memory[0x020000], 0x5a);
     }
 
     #[test]

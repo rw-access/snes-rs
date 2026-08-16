@@ -276,7 +276,8 @@ impl Ppu {
         }
 
         match self.bgmode & 0x07 {
-            0 | 1 | 2 | 3 => self.render_tile_mode(pixels, self.bgmode & 0x07),
+            0 | 1 | 2 | 3 | 4 => self.render_tile_mode(pixels, self.bgmode & 0x07),
+            5 | 6 => self.render_hires_tile_mode(pixels, self.bgmode & 0x07),
             7 => self.render_mode7(pixels),
             _ => {}
         }
@@ -293,6 +294,27 @@ impl Ppu {
         }
     }
 
+    /// Renders Modes 5 and 6 through the existing 256-pixel framebuffer.
+    ///
+    /// These modes produce 512 horizontal pixels on hardware.  The public
+    /// renderer currently exposes a 256-pixel surface, so each output pixel
+    /// samples the left member of one horizontal high-resolution pair.  The
+    /// tile and scroll coordinates remain high-resolution coordinates, which
+    /// preserves the important 16-pixel character pairing and makes this a
+    /// deterministic downsample boundary until a 512-wide video surface is
+    /// introduced.
+    fn render_hires_tile_mode(&self, pixels: &mut [u32], mode: u8) {
+        for y in 0..SCREEN_HEIGHT {
+            for x in 0..SCREEN_WIDTH {
+                let hires_x = x * 2;
+                let main = self.screen_pixel_at(hires_x, y, mode, self.tm, self.tmw, false, true);
+                let sub = self.screen_pixel_at(hires_x, y, mode, self.ts, self.tsw, true, true);
+                let color = self.compose_screens(main, sub, x);
+                pixels[y * SCREEN_WIDTH + x] = self.color_to_rgba(color);
+            }
+        }
+    }
+
     fn screen_pixel(
         &self,
         x: usize,
@@ -302,6 +324,20 @@ impl Ppu {
         window_mask: u8,
         subscreen: bool,
     ) -> ScreenPixel {
+        self.screen_pixel_at(x, y, mode, layer_mask, window_mask, subscreen, false)
+    }
+
+    fn screen_pixel_at(
+        &self,
+        x: usize,
+        y: usize,
+        mode: u8,
+        layer_mask: u8,
+        window_mask: u8,
+        subscreen: bool,
+        hires: bool,
+    ) -> ScreenPixel {
+        let window_x = if hires { x / 2 } else { x };
         let mut selected = ScreenPixel {
             color: if subscreen {
                 self.fixed_color
@@ -313,7 +349,8 @@ impl Ppu {
         };
         let layers = match mode {
             1 => 3,
-            2 | 3 => 2,
+            2 | 3 | 4 | 5 => 2,
+            6 => 1,
             _ => 4,
         };
         for &(layer, high) in &[
@@ -329,19 +366,25 @@ impl Ppu {
             if layer >= layers || layer_mask & (1 << layer) == 0 {
                 continue;
             }
-            if window_mask & (1 << layer) != 0 && self.window_hides(layer, x) {
+            if window_mask & (1 << layer) != 0 && self.window_hides(layer, window_x) {
                 continue;
             }
-            let (color, tile_priority) = self.bg_pixel_for_mode(layer, x, y, high, mode);
+            let (color, tile_priority, entry) =
+                self.bg_pixel_details(layer, x, y, high, mode, hires);
             let priority = self.bg_priority(mode, layer, tile_priority);
             if color != 0 && tile_priority == high && priority > selected.priority {
-                let palette_index = if mode == 0 {
-                    layer * 32 + usize::from(color)
+                let color = if (mode == 4 || mode == 3) && layer == 0 && self.cgwsel & 0x01 != 0 {
+                    self.direct_color(color, entry)
                 } else {
-                    usize::from(color)
+                    let palette_index = if mode == 0 {
+                        layer * 32 + usize::from(color)
+                    } else {
+                        usize::from(color)
+                    };
+                    self.cgram[palette_index]
                 };
                 selected = ScreenPixel {
-                    color: self.cgram[palette_index],
+                    color,
                     source: 1 << layer,
                     priority,
                 };
@@ -487,7 +530,7 @@ impl Ppu {
                 _ => 0,
             };
         }
-        if matches!(mode, 2 | 3) {
+        if matches!(mode, 2 | 3 | 4 | 5 | 6) {
             return match (layer, high) {
                 (0, true) => 11, // 1H
                 (1, true) => 8,  // 2H
@@ -518,48 +561,53 @@ impl Ppu {
         }
     }
 
-    fn bg_pixel_for_mode(
+    fn bg_pixel_details(
         &self,
         layer: usize,
         x: usize,
         y: usize,
         high: bool,
         mode: u8,
-    ) -> (u8, bool) {
+        hires: bool,
+    ) -> (u8, bool, u16) {
         let screen = self.bg_screen(layer);
         let (scroll_x, scroll_y) = self.bg_scroll_for_mode(mode, layer, x);
-        let sx = (x + scroll_x) & 0x1ff;
+        let tile_width = if hires { 16 } else { 8 };
+        let tile_height = if hires && self.bg_16x16(layer) { 16 } else { 8 };
+        let coordinate_mask = if hires { 0x3ff } else { 0x1ff };
+        let sx = (x + scroll_x) & coordinate_mask;
         let sy = (y + scroll_y) & 0x1ff;
-        let tile_x = sx / 8;
-        let tile_y = sy / 8;
+        let tile_x = sx / tile_width;
+        let tile_y = sy / tile_height;
         let entry = self.bg_map_entry(screen, tile_x, tile_y);
         if ((entry >> 13) & 1 != 0) != high {
-            return (0, false);
+            return (0, false, entry);
         }
-        let mut row = sy & 7;
-        let mut column = sx & 7;
+        let mut row = sy % tile_height;
+        let mut column = sx % tile_width;
         if entry & 0x8000 != 0 {
-            row = 7 - row;
+            row = tile_height - 1 - row;
         }
         if entry & 0x4000 != 0 {
-            column = 7 - column;
+            column = tile_width - 1 - column;
         }
-        let eight_bpp = mode == 3 && layer == 0;
-        let four_bpp = eight_bpp || (matches!(mode, 1 | 2 | 3) && layer < 2);
-        let bpp: u8 = if eight_bpp {
-            8
-        } else if four_bpp {
-            4
-        } else {
-            2
-        };
+        let bpp = self.bg_bpp(mode, layer);
+        let tile_column = column / 8;
+        let tile_row = row / 8;
+        let tile_index = usize::from(entry & 0x03ff)
+            + if hires {
+                tile_column + tile_row * 16
+            } else {
+                0
+            };
         let tile_base = self.bg_tile_base(layer);
         let tile_stride = usize::from(bpp) * 4;
-        let tile_base = tile_base + usize::from(entry & 0x03ff) * tile_stride;
-        let color = self.tile_pixel(tile_base, row, column, bpp);
+        let tile_base = tile_base + tile_index * tile_stride;
+        let color = self.tile_pixel(tile_base, row & 7, column & 7, bpp);
         if color == 0 {
-            (0, false)
+            (0, false, entry)
         } else {
+            let eight_bpp = bpp == 8;
             let palette = if eight_bpp {
                 0
             } else {
@@ -567,13 +615,44 @@ impl Ppu {
             };
             let palette_width = if eight_bpp {
                 256
-            } else if four_bpp {
+            } else if bpp == 4 {
                 16
             } else {
                 4
             };
-            ((palette * palette_width + usize::from(color)) as u8, high)
+            (
+                (palette * palette_width + usize::from(color)) as u8,
+                high,
+                entry,
+            )
         }
+    }
+
+    fn bg_bpp(&self, mode: u8, layer: usize) -> u8 {
+        match (mode, layer) {
+            (3 | 4, 0) => 8,
+            (1 | 2 | 5 | 6, 0) | (1 | 2 | 3, 1) => 4,
+            _ => 2,
+        }
+    }
+
+    fn bg_16x16(&self, layer: usize) -> bool {
+        self.bgmode & (1 << (4 + layer)) != 0
+    }
+
+    fn direct_color(&self, color: u8, entry: u16) -> u16 {
+        let palette = ((entry >> 10) & 0x07) as u8;
+        let red = (u16::from(color & 0x07) << 2) | (u16::from(palette & 0x01) << 1);
+        let green = (u16::from((color >> 3) & 0x07) << 2) | u16::from(palette & 0x02);
+        let blue = (u16::from((color >> 6) & 0x03) << 3) | u16::from(palette & 0x04);
+        red | (green << 5) | (blue << 10)
+    }
+
+    fn mode7_direct_color(&self, color: u8) -> u16 {
+        let red = u16::from(color & 0x07) << 2;
+        let green = u16::from((color >> 3) & 0x07) << 2;
+        let blue = u16::from((color >> 6) & 0x03) << 3;
+        red | (green << 5) | (blue << 10)
     }
 
     fn bg_scroll_for_mode(&self, mode: u8, layer: usize, x: usize) -> (usize, usize) {
@@ -581,7 +660,7 @@ impl Ppu {
             usize::from(self.bg_hofs[layer]),
             usize::from(self.bg_vofs[layer]),
         );
-        if mode != 2 || layer >= 2 {
+        if !matches!(mode, 2 | 4) || layer >= 2 {
             return normal;
         }
 
@@ -801,6 +880,8 @@ impl Ppu {
                 if color != 0 && (self.tmw & 0x01 == 0 || !self.window_hides(0, x)) {
                     let color = if self.main_color_window_applies(x) {
                         0
+                    } else if self.cgwsel & 0x01 != 0 {
+                        self.mode7_direct_color(color)
                     } else {
                         self.cgram[usize::from(color)]
                     };
@@ -979,7 +1060,8 @@ mod tests {
 
         assert_eq!(ppu.vram[0], 1);
         assert_eq!(ppu.vram[8], 0x0080);
-        assert_eq!(ppu.bg_pixel_for_mode(0, 0, 0, false, 0), (1, false));
+        let details = ppu.bg_pixel_details(0, 0, 0, false, 0, false);
+        assert_eq!((details.0, details.1), (1, false));
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.render_frame(&mut frame);
@@ -1168,6 +1250,122 @@ mod tests {
     }
 
     #[test]
+    fn mode_four_renders_bg1_eight_bpp_and_direct_color() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 4;
+        ppu.tm = 0x01;
+        ppu.cgwsel = 0x01; // BG1 8bpp direct color.
+        ppu.vram[0] = 1 | (5 << 10);
+
+        // Pixel 0 is 0xa5: planes 0, 2, 5, and 7 are set in the packed
+        // 8bpp tile representation.  Tile 1 starts at word 32.
+        ppu.vram[32] = 0x0080;
+        ppu.vram[40] = 0x0080;
+        ppu.vram[48] = 0x8000;
+        ppu.vram[56] = 0x8000;
+        ppu.vram[0] |= 0x0000; // Keep the map entry's palette attribute visible.
+
+        let expected = ppu.direct_color(0xa5, ppu.vram[0]);
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(expected));
+
+        // Clearing direct color makes the same 8bpp pixel index CGRAM.
+        ppu.cgwsel = 0;
+        ppu.cgram[0xa5] = 0x03e0;
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+    }
+
+    #[test]
+    fn mode_four_renders_bg2_two_bpp_palette_groups() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 4;
+        ppu.bg2sc = 0x04;
+        ppu.bg12nba = 0x10; // BG2 tile data at word 0x1000.
+        ppu.tm = 0x02;
+        ppu.cgram[11] = 0x03e0; // BG2 palette 2, color 3.
+        ppu.vram[0x0400] = 1 | (2 << 10);
+        ppu.vram[0x1008] = 0x8080;
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x03e0));
+    }
+
+    #[test]
+    fn modes_five_and_six_render_hires_tile_pairs() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 5;
+        ppu.tm = 0x01;
+        ppu.cgram[1] = 0x001f;
+        ppu.cgram[2] = 0x03e0;
+
+        // Mode 5's 16x8 character selects adjacent 8x8 tiles.  The public
+        // 256-wide surface samples the first pixel of each 2-pixel pair, so
+        // the second 8-pixel tile of the 16-pixel character begins at output
+        // x=4.
+        ppu.vram[0] = 1; // map entry selects tile 1
+        ppu.vram[16] = 0x0080; // tile 1, color 1 at pixel 0
+        ppu.vram[32] = 0x8000; // tile 2, color 2 at pixel 0
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+        assert_eq!(frame[4], ppu.color_to_rgba(0x03e0));
+
+        // Mode 5's auxiliary layer remains 2bpp and uses the low CGRAM
+        // palette groups.
+        ppu.bgmode = 5;
+        ppu.tm = 0x02;
+        ppu.bg2sc = 0x04;
+        ppu.bg12nba = 0x10;
+        ppu.cgram[3] = 0x001f;
+        ppu.vram[0x0400] = 1;
+        ppu.vram[0x1008] = 0x8080;
+        frame.fill(0);
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x001f));
+
+        // Mode 6 keeps the same high-resolution tile geometry but exposes
+        // only BG1, using its 4bpp tile data.
+        ppu.bgmode = 6;
+        ppu.tm = 0x01;
+        ppu.vram[0] = 1;
+        ppu.vram[16] = 0x0080;
+        ppu.cgram[1] = 0x7c00;
+        frame.fill(0);
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[0], ppu.color_to_rgba(0x7c00));
+    }
+
+    #[test]
+    fn mode_seven_can_use_direct_color() {
+        let mut ppu = Ppu::default();
+        ppu.inidisp = 0;
+        ppu.bgmode = 7;
+        ppu.tm = 1;
+        ppu.cgwsel = 1;
+        ppu.m7a = 0x0100;
+        ppu.m7d = 0x0100;
+        ppu.m7x = 128;
+        ppu.m7y = 112;
+        for map in 0..0x4000 {
+            ppu.vram[map] = 1;
+        }
+        for pixel in 0..64 {
+            ppu.vram[0x4000 + 64 + pixel] = 0xa5;
+        }
+
+        let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
+        ppu.render_frame(&mut frame);
+        assert_eq!(frame[112 * SCREEN_WIDTH + 128], ppu.color_to_rgba(0x4214));
+    }
+
+    #[test]
     fn mode_one_renders_bg2_four_bpp_and_bg3_two_bpp_palette_indices() {
         let mut ppu = Ppu::default();
         ppu.inidisp = 0;
@@ -1237,7 +1435,8 @@ mod tests {
         ppu.vram[0x0010] = 0x0080; // BG1 color 1.
         ppu.vram[0x1010] = 0x0080; // BG2 color 1.
         ppu.vram[0x1018] = 0x0080; // BG2 color 4, making color 5.
-        assert_eq!(ppu.bg_pixel_for_mode(1, 0, 0, true, 2), (21, true));
+        let details = ppu.bg_pixel_details(1, 0, 0, true, 2, false);
+        assert_eq!((details.0, details.1), (21, true));
 
         let mut frame = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
         ppu.tm = 0x02;

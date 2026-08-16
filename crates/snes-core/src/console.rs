@@ -1,7 +1,7 @@
 //! Complete-machine ownership boundary.
 
 use crate::{
-    apu::Apu,
+    apu::{Apu, AudioSample},
     bus::{Address24, TraceSink},
     cartridge::{CartridgeDevice, LoadError, RomImage, RomOnlyCartridge},
     controller::{ControllerPort, ControllerPorts},
@@ -322,6 +322,11 @@ impl Console {
             width: SCREEN_WIDTH as u16,
             height: SCREEN_HEIGHT as u16,
         }
+    }
+
+    /// Renders a bounded batch of audio samples from the owned APU mixer.
+    pub fn render_audio(&mut self, sample_count: usize) -> Vec<AudioSample> {
+        self.apu.render_audio(sample_count)
     }
 
     /// Reads a byte through the future complete SNES bus.
@@ -983,5 +988,38 @@ mod tests {
         console.timing = TimingState::default();
         console.restore(&snapshot).unwrap();
         assert_eq!(console.timing, snapshot.timing);
+    }
+
+    #[test]
+    fn console_audio_rendering_reaches_owned_mixer_deterministically() {
+        fn configure_audio(console: &mut Console) {
+            console.apu.dsp[0x5d] = 0x10;
+            console.apu.ram[0x1000..0x1004].copy_from_slice(&[0x00, 0x20, 0x00, 0x20]);
+            console.apu.ram[0x2000] = 0x03;
+            console.apu.ram[0x2001] = 0x77;
+            console.apu.dsp[0x00] = 0x7f;
+            console.apu.dsp[0x01] = 0x7f;
+            console.apu.dsp[0x03] = 0x10;
+            console.apu.dsp[0x04] = 0;
+            console.apu.dsp[0x07] = 0x7f;
+            console.apu.dsp[0x0c] = 0x7f;
+            console.apu.dsp[0x1c] = 0x7f;
+            console.apu.write_dsp_address(0x4c);
+            console.apu.write_dsp_data(0x01);
+        }
+
+        let rom = RomImage::new(vec![0xea; 0x8000]);
+        let mut first = Console::new(rom.clone()).unwrap();
+        let mut second = Console::new(rom).unwrap();
+        configure_audio(&mut first);
+        configure_audio(&mut second);
+
+        let first_samples = first.render_audio(2);
+        let second_samples = second.render_audio(2);
+
+        assert_eq!(first_samples, second_samples);
+        assert!(first_samples[0].left > 20_000);
+        assert_eq!(first_samples[0].left, first_samples[0].right);
+        assert_eq!(first.apu.dsp[0x09], 0x70);
     }
 }

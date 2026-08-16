@@ -16,7 +16,7 @@ pub mod ppu;
 pub mod rewind;
 pub mod video;
 
-pub use apu::Apu;
+pub use apu::{Apu, AudioSample};
 pub use bus::{AccessSpeed, Address24, BusAccess, BusAccessKind, TraceSink, VecTrace};
 pub use cartridge::{CartridgeDevice, LoadError, MappingMode, RomImage, RomMetadata};
 pub use console::{
