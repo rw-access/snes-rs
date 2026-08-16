@@ -20,25 +20,85 @@ Normal `cargo test --workspace` must remain runnable without downloading ROMs.
 External ROMs are pinned in `tests/snes-test-roms/sources.json`, fetched only
 through the opt-in script, and never required by ordinary tests.
 
+## Corpus audit and acceptance tiers
+
+The manifest is a provenance inventory, not a declaration that every materialized
+file is a bootable SNES ROM or has an automatic oracle. The files must be
+accepted according to their role:
+
+| Corpus material | Acceptance role | Required evidence | Current status |
+| --- | --- | --- | --- |
+| `singlesteptests-65816/v1/*.json` | CPU conformance | Compare initial/final registers, memory, and applicable ordered bus accesses for the selected vectors. | Not wired into a repository test yet. |
+| `peterlemon-snes/CPUTest/CPU/*.sfc` with its sibling `.png` | CPU/PPU integration | Run the matching ROM to its documented result, capture a declared frame, and compare the matching lossless reference. | The runner can load and bound execution, but does not capture or compare a frame. |
+| Bootable `.sfc`/`.smc` files under `higan-snes-test-roms` | Hardware integration | A per-ROM descriptor must name the result oracle: memory/register state, timing trace, audio output, or frame comparison. | No generic pass rule exists; bounded execution is diagnostic only. |
+| `.spc`, `.bin`, source files, and standalone image/audio fixtures | Subsystem fixture | Consume them only through the subsystem-specific harness that defines their format and oracle. | Must not be passed to the SNES boot-ROM runner as a suite. |
+
+This prevents a successful file load, a non-crashing bounded run, or an early
+`STP` from being reported as emulator compatibility.
+
+The corpus gates are intentionally layered:
+
+1. `python3 scripts/fetch_snes_test_roms.py --verify-only` validates the
+   manifest shape and immutable revision strings. It does not contact the
+   remotes and therefore does not prove that a revision is fetchable.
+2. A real fetch must resolve every selected cache to the exact manifest commit
+   and materialize at least one selected file. The cache's `rev-parse` result is
+   the provenance check; file counts alone are not.
+3. `cargo test --workspace` proves only the checked-in unit and boundary tests.
+   It deliberately says nothing about the optional corpus.
+4. An external-ROM gate may be called a pass only when it reports the named
+   oracle for every selected case. The current `snes-test` binary reports only
+   bounded ticks and `stopped`; it is not that gate.
+
+The current execution limit is instruction/DMA-granular rather than a hard
+cutoff: a request for `N` master ticks may report a value greater than `N` after
+the final instruction or transfer. An acceptance descriptor must record an
+explicit overshoot policy, and a future strict timing gate must fail if that
+policy is violated. Likewise, the current CLI prints load/usage errors without
+providing a complete result protocol, so its process exit status is not an
+acceptance signal. The `RomTestDescriptor::mapping` field is also not evidence
+of an override until the runner actually applies it when loading a ROM.
+
 ## Visual acceptance contract
 
 PPU tests are not considered passing merely because a ROM reaches a stop state.
 Each visual test must record:
 
 - the immutable ROM source and revision;
+- the exact ROM path within that pinned source and a checksum of the input file;
 - the frame number captured after reset and input setup;
-- output dimensions and pixel format;
+- output dimensions and pixel format. Until the video API exposes this as a
+  named type, the current convention is row-major `u32` pixels in `0xAARRGGBB`
+  order, with the top-left pixel first;
 - a lossless reference image where possible;
-- an explicit per-pixel tolerance and any masked unstable region.
+- an explicit per-channel tolerance and any masked unstable region, including
+  the reason for every nonzero tolerance or mask.
 
-PNG references can be strict golden tests after the renderer is deterministic.
-JPEG references and tests involving documented hardware glitches remain
-diagnostic until a tolerance/mask is recorded. A visual mismatch must preserve
-the actual frame and a diff image as test artifacts for review.
+For the ordinary NTSC baseline, a reference must normally be 256x224. A test
+must still record its actual dimensions because hires, interlace, and external
+captures may differ. PNG references can be strict golden tests only after the
+renderer and frame boundary are deterministic; the default PNG tolerance is
+zero. JPEG references, format-converted captures, and tests involving documented
+hardware glitches remain diagnostic until a justified tolerance/mask is
+recorded.
+
+A visual gate must fail on a dimension, frame-selection, or pixel mismatch. On
+failure it must preserve the actual frame and a diff image, together with the
+case metadata, under a reproducible artifact directory such as
+`target/snes-acceptance/<case>/`. The current `compare_frame` helper reports the
+first mismatch but does not create these artifacts or apply masks, so no pinned
+visual ROM is currently an enabled golden gate.
+
+Before enabling one, the harness must prove determinism by running the same ROM
+and input sequence twice from reset and comparing the captured frame and the
+relevant machine-state/result oracle. `run_for_frames` plus `next_frame` is not
+yet sufficient evidence by itself: the current frame duration is an approximate
+bound and scanline/VBlank frame synchronization is still incomplete.
 
 ## Current implementation boundary
 
-Implemented and covered by ordinary workspace tests:
+The following have focused ordinary workspace tests. That evidence is narrower
+than corpus compatibility and must not be promoted to a ROM-suite pass:
 
 - 65816 state, a broad immediate/direct/absolute/long/indirect execution slice,
   stack/control flow, decimal ALU operations, block moves, interrupts, and
@@ -52,4 +112,6 @@ Implemented and covered by ordinary workspace tests:
 Remaining before claiming broad emulator compatibility: complete 65816 and
 SPC700 opcode coverage, scanline-level timing and HDMA, sprites/windows/color
 math/Mode 7, DSP voice mixing, enhancement-chip cartridges, and pinned ROM
-expected-result plus visual golden runs.
+expected-result plus visual golden runs. The acceptance harness also still
+needs JSON-vector execution, per-ROM descriptors, frame capture/diff artifacts,
+and deterministic replay checks before the pinned corpus can be called passed.

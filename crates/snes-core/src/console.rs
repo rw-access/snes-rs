@@ -86,6 +86,7 @@ impl Console {
         let step = self.cpu.step_with_bus(&mut bus, None);
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         drop(bus);
+        self.apu.step_spc700();
         self.run_pending_dma();
         step
     }
@@ -102,6 +103,7 @@ impl Console {
         let step = self.cpu.step_with_bus(&mut bus, Some(trace));
         self.timing.master_ticks = self.timing.master_ticks.saturating_add(step.master_ticks);
         drop(bus);
+        self.apu.step_spc700();
         self.run_pending_dma();
         step
     }

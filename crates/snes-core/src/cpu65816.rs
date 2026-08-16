@@ -801,6 +801,99 @@ impl Cpu65816 {
                 self.compare(lhs, value, width);
                 cycles = 2 + u32::from(!width);
             }
+            0xc4 | 0xcc | 0xe4 | 0xec => {
+                let width = self.index_is_8_bit();
+                let address = if opcode == 0xc4 || opcode == 0xe4 {
+                    self.direct_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                } else {
+                    self.absolute_address(
+                        bus,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    )
+                };
+                let value = self.read_value(
+                    bus,
+                    address,
+                    width,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                let register = if opcode == 0xc4 || opcode == 0xcc {
+                    self.state.y
+                } else {
+                    self.state.x
+                };
+                self.compare(register, value, width);
+                cycles = if opcode == 0xc4 || opcode == 0xe4 { 3 } else { 4 };
+            }
+            0x02 | 0x42 => {
+                self.fetch_byte(
+                    bus,
+                    &mut trace,
+                    &mut cycles,
+                    &mut master_ticks,
+                    &mut access_count,
+                );
+                if opcode == 0x02 {
+                    if !self.state.emulation_mode {
+                        self.push_byte(
+                            bus,
+                            self.state.program_bank,
+                            &mut trace,
+                            &mut master_ticks,
+                            &mut access_count,
+                        );
+                    }
+                    self.push_word(
+                        bus,
+                        self.state.pc,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.push_byte(
+                        bus,
+                        self.state.status,
+                        &mut trace,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.state.status |= FLAG_IRQ_DISABLE;
+                    self.state.status &= !0x08;
+                    self.state.program_bank = 0;
+                    let lo = self.read(
+                        bus,
+                        Address24::new(0xfff4),
+                        BusAccessKind::VectorFetch,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    let hi = self.read(
+                        bus,
+                        Address24::new(0xfff5),
+                        BusAccessKind::VectorFetch,
+                        &mut trace,
+                        &mut cycles,
+                        &mut master_ticks,
+                        &mut access_count,
+                    );
+                    self.state.pc = u16::from_le_bytes([lo, hi]);
+                }
+                cycles = 2;
+            }
             0x89 => {
                 let value = self.fetch_value(
                     bus,
@@ -2684,5 +2777,42 @@ mod tests {
         assert_ne!(cpu.state().status & FLAG_IRQ_DISABLE, 0);
         assert_eq!(bus.memory[0x01ff], 0x12);
         assert_eq!(bus.memory[0x01fe], 0x34);
+    }
+
+    #[test]
+    fn compare_register_forms_and_cop_vector_dispatch() {
+        let mut bus = FlatBus::new();
+        bus.memory[..13].copy_from_slice(&[
+            0xa2, 0x05, // LDX #$05
+            0xe0, 0x05, // CPX #$05
+            0xa0, 0x04, // LDY #$04
+            0xc0, 0x05, // CPY #$05
+            0xe4, 0x10, // CPX $10
+            0xcc, 0x11, 0x00, // CPY $0011
+        ]);
+        bus.memory[0x10] = 0x05;
+        bus.memory[0x11] = 0x05;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_ne!(cpu.state().status & FLAG_CARRY, 0);
+        assert_ne!(cpu.state().status & FLAG_ZERO, 0);
+        cpu.step_with_bus(&mut bus, None);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().status & FLAG_CARRY, 0);
+        assert_ne!(cpu.state().status & FLAG_NEGATIVE, 0);
+        cpu.step_with_bus(&mut bus, None);
+        assert_ne!(cpu.state().status & FLAG_ZERO, 0);
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().status & FLAG_CARRY, 0);
+
+        let mut bus = FlatBus::new();
+        bus.memory[..2].copy_from_slice(&[0x02, 0x7f]);
+        bus.memory[0xfff4] = 0x00;
+        bus.memory[0xfff5] = 0x90;
+        let mut cpu = Cpu65816::default();
+        cpu.step_with_bus(&mut bus, None);
+        assert_eq!(cpu.state().pc, 0x9000);
+        assert_eq!(bus.memory[0x01fd], 0x34);
     }
 }
