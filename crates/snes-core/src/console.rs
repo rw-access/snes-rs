@@ -97,8 +97,8 @@ impl Console {
     /// Reads a byte through the future complete SNES bus.
     pub fn read_memory(&self, address: Address24) -> u8 {
         let raw = address.get();
-        if (0x7e_0000..=0x7f_ffff).contains(&raw) {
-            return self.wram[(raw as usize - 0x7e_0000) % self.wram.len()];
+        if let Some(index) = wram_index(raw, self.wram.len()) {
+            return self.wram[index];
         }
         0
     }
@@ -153,21 +153,32 @@ struct ConsoleBus<'a> {
 impl CpuBus for ConsoleBus<'_> {
     fn read(&mut self, address: Address24) -> u8 {
         let raw = address.get();
-        if (0x7e_0000..=0x7f_ffff).contains(&raw) {
-            return self.wram[(raw as usize - 0x7e_0000) % self.wram.len()];
+        if let Some(index) = wram_index(raw, self.wram.len()) {
+            return self.wram[index];
         }
         self.cartridge.read(address)
     }
 
     fn write(&mut self, address: Address24, value: u8) {
         let raw = address.get();
-        if (0x7e_0000..=0x7f_ffff).contains(&raw) {
-            let index = (raw as usize - 0x7e_0000) % self.wram.len();
+        if let Some(index) = wram_index(raw, self.wram.len()) {
             self.wram[index] = value;
         } else {
             self.cartridge.write(address, value);
         }
     }
+}
+
+fn wram_index(address: u32, wram_len: usize) -> Option<usize> {
+    let bank = address >> 16;
+    let offset = address & 0xffff;
+    if (0x7e..=0x7f).contains(&bank) {
+        return Some(((address - 0x7e_0000) as usize) % wram_len);
+    }
+    if (bank <= 0x3f || (0x80..=0xbf).contains(&bank)) && offset < 0x2000 {
+        return Some((offset as usize) % wram_len);
+    }
+    None
 }
 
 /// Serializable snapshot boundary for deterministic replay tooling.
@@ -204,7 +215,11 @@ mod tests {
 
     #[test]
     fn snapshot_restores_memory_and_timing() {
-        let mut console = Console::new(RomImage::new(vec![1, 2, 3])).unwrap();
+        let mut rom = vec![0xea; 0x8000];
+        rom[0x7ffc] = 0x00;
+        rom[0x7ffd] = 0x80;
+        let mut console = Console::new(RomImage::new(rom)).unwrap();
+        console.reset();
         console.run_for_master_ticks(123);
         let snapshot = console.snapshot();
         console.run_for_master_ticks(456);
@@ -241,5 +256,17 @@ mod tests {
         console.step_instruction();
         console.step_instruction();
         assert_eq!(console.read_memory(Address24::new(0x7e0000)), 0x5a);
+    }
+
+    #[test]
+    fn console_exposes_low_wram_mirrors() {
+        let mut console = Console::new(RomImage::new(vec![0; 8])).unwrap();
+        let mut bus = ConsoleBus {
+            wram: &mut console.wram,
+            cartridge: &mut *console.cartridge,
+        };
+        bus.write(Address24::new(0x000123), 0xa5);
+        assert_eq!(console.read_memory(Address24::new(0x7e0123)), 0xa5);
+        assert_eq!(console.read_memory(Address24::new(0x800123)), 0xa5);
     }
 }
