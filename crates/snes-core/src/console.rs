@@ -90,9 +90,13 @@ impl Console {
     pub fn step_instruction(&mut self) -> CpuStep {
         self.ppu.set_raster_scanline(self.timing.scanline);
         let pending = self.pending_interrupt();
+        let sa1_irq_vector = self.timing.sa1_irq_vector;
         match pending {
             Some(InterruptKind::Nmi) => self.timing.pending_nmi = false,
-            Some(InterruptKind::Irq) => self.timing.pending_irq = false,
+            Some(InterruptKind::Irq) => {
+                self.timing.pending_irq = false;
+                self.timing.sa1_irq_vector = None;
+            }
             Some(InterruptKind::Cop) | None => {}
         }
         let mut bus = ConsoleBus {
@@ -118,8 +122,13 @@ impl Console {
                     .service_interrupt(&mut bus, InterruptKind::Nmi, None)
             }
             Some(InterruptKind::Irq) => {
-                self.cpu
-                    .service_interrupt(&mut bus, InterruptKind::Irq, None)
+                if let Some(vector) = sa1_irq_vector {
+                    self.cpu
+                        .service_interrupt_at(&mut bus, InterruptKind::Irq, vector, None)
+                } else {
+                    self.cpu
+                        .service_interrupt(&mut bus, InterruptKind::Irq, None)
+                }
             }
             Some(InterruptKind::Cop) | None => self.cpu.step_with_bus(&mut bus, None),
         };
@@ -130,9 +139,13 @@ impl Console {
     pub fn step_instruction_traced(&mut self, trace: &mut dyn TraceSink) -> CpuStep {
         self.ppu.set_raster_scanline(self.timing.scanline);
         let pending = self.pending_interrupt();
+        let sa1_irq_vector = self.timing.sa1_irq_vector;
         match pending {
             Some(InterruptKind::Nmi) => self.timing.pending_nmi = false,
-            Some(InterruptKind::Irq) => self.timing.pending_irq = false,
+            Some(InterruptKind::Irq) => {
+                self.timing.pending_irq = false;
+                self.timing.sa1_irq_vector = None;
+            }
             Some(InterruptKind::Cop) | None => {}
         }
         let mut bus = ConsoleBus {
@@ -158,8 +171,13 @@ impl Console {
                     .service_interrupt(&mut bus, InterruptKind::Nmi, Some(trace))
             }
             Some(InterruptKind::Irq) => {
-                self.cpu
-                    .service_interrupt(&mut bus, InterruptKind::Irq, Some(trace))
+                if let Some(vector) = sa1_irq_vector {
+                    self.cpu
+                        .service_interrupt_at(&mut bus, InterruptKind::Irq, vector, Some(trace))
+                } else {
+                    self.cpu
+                        .service_interrupt(&mut bus, InterruptKind::Irq, Some(trace))
+                }
             }
             Some(InterruptKind::Cop) | None => self.cpu.step_with_bus(&mut bus, Some(trace)),
         };
@@ -171,7 +189,10 @@ impl Console {
         self.ppu.set_raster_scanline(self.timing.scanline);
         match kind {
             InterruptKind::Nmi => self.timing.pending_nmi = false,
-            InterruptKind::Irq => self.timing.pending_irq = false,
+            InterruptKind::Irq => {
+                self.timing.pending_irq = false;
+                self.timing.sa1_irq_vector = None;
+            }
             InterruptKind::Cop => {}
         }
         let mut bus = ConsoleBus {
@@ -218,24 +239,45 @@ impl Console {
         let Some(vector) = self.cartridge.sa1_reset_vector() else {
             return;
         };
-        if self.sa1_cpu.is_none() {
+        let reset = self.cartridge.take_sa1_reset();
+        let ready = self.cartridge.take_sa1_ready();
+        if reset || self.sa1_cpu.is_none() {
             let mut cpu = Cpu65816::default();
             cpu.reset_at(vector);
             self.sa1_cpu = Some(cpu);
         }
         let mut cpu = self.sa1_cpu.take().expect("SA-1 CPU initialized");
+        if ready && cpu.state().stopped {
+            cpu.release_stop();
+        }
         let steps = (ticks / 2).max(1).min(100_000);
         for _ in 0..steps {
+            if cpu.state().stopped {
+                break;
+            }
+            let service_irq =
+                cpu.state().status & CPU_IRQ_DISABLE == 0 && self.cartridge.take_sa1_cpu_irq();
+            let sa1_cpu_irq_vector = self.cartridge.sa1_cpu_irq_vector();
             let mut bus = Sa1Bus {
                 cartridge: &mut *self.cartridge,
             };
-            cpu.step_with_bus(&mut bus, None);
+            if service_irq {
+                cpu.service_interrupt_at(
+                    &mut bus,
+                    InterruptKind::Irq,
+                    sa1_cpu_irq_vector.unwrap_or(0),
+                    None,
+                );
+            } else {
+                cpu.step_with_bus(&mut bus, None);
+            }
             if cpu.state().stopped {
                 break;
             }
         }
         self.sa1_cpu = Some(cpu);
         if self.cartridge.take_sa1_irq() {
+            self.timing.sa1_irq_vector = self.cartridge.sa1_snes_irq_vector();
             self.timing.pending_irq = true;
         }
     }
@@ -631,6 +673,7 @@ pub struct TimingState {
     pub v_timer: u16,
     pub pending_nmi: bool,
     pub pending_irq: bool,
+    pub sa1_irq_vector: Option<u16>,
     pub h_timer_fired: bool,
 }
 
@@ -647,6 +690,7 @@ impl Default for TimingState {
             v_timer: 0,
             pending_nmi: false,
             pending_irq: false,
+            sa1_irq_vector: None,
             h_timer_fired: false,
         }
     }
@@ -669,6 +713,7 @@ impl TimingState {
                 let value = if self.timeup { 0x80 } else { 0 };
                 self.timeup = false;
                 self.pending_irq = false;
+                self.sa1_irq_vector = None;
                 value
             }
             0x4212 => {

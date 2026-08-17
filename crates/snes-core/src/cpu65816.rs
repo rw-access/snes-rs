@@ -120,10 +120,33 @@ impl Cpu65816 {
         self.state.pc = pc;
     }
 
+    pub(crate) fn release_stop(&mut self) {
+        self.state.stopped = false;
+    }
+
     pub fn service_interrupt(
         &mut self,
         bus: &mut dyn CpuBus,
         kind: InterruptKind,
+        trace: Option<&mut dyn TraceSink>,
+    ) -> CpuStep {
+        let vector = match (kind, self.state.emulation_mode) {
+            // Native-mode interrupt vectors live in the upper half of the
+            // vector table; emulation mode uses the legacy 6502 locations.
+            (InterruptKind::Nmi, false) => 0xffea,
+            (InterruptKind::Irq, false) => 0xffee,
+            (InterruptKind::Cop, false) => 0xffe4,
+            (InterruptKind::Nmi, true) => 0xfffa,
+            (InterruptKind::Irq, true) => 0xfffe,
+            (InterruptKind::Cop, true) => 0xfff4,
+        };
+        self.service_interrupt_from_table(bus, vector, trace)
+    }
+
+    fn service_interrupt_from_table(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        vector: u16,
         mut trace: Option<&mut dyn TraceSink>,
     ) -> CpuStep {
         let mut cycles = 0;
@@ -156,19 +179,9 @@ impl Cpu65816 {
         self.state.status &= !0x08;
         self.state.program_bank = 0;
         self.state.waiting = false;
-        let vector = match (kind, self.state.emulation_mode) {
-            // Native-mode interrupt vectors live in the upper half of the
-            // vector table; emulation mode uses the legacy 6502 locations.
-            (InterruptKind::Nmi, false) => 0xffea,
-            (InterruptKind::Irq, false) => 0xffee,
-            (InterruptKind::Cop, false) => 0xffe4,
-            (InterruptKind::Nmi, true) => 0xfffa,
-            (InterruptKind::Irq, true) => 0xfffe,
-            (InterruptKind::Cop, true) => 0xfff4,
-        };
         let lo = self.read(
             bus,
-            Address24::new(vector),
+            Address24::new(u32::from(vector)),
             BusAccessKind::VectorFetch,
             &mut trace,
             &mut cycles,
@@ -177,7 +190,7 @@ impl Cpu65816 {
         );
         let hi = self.read(
             bus,
-            Address24::new(vector + 1),
+            Address24::new(u32::from(vector) + 1),
             BusAccessKind::VectorFetch,
             &mut trace,
             &mut cycles,
@@ -185,6 +198,63 @@ impl Cpu65816 {
             &mut access_count,
         );
         self.state.pc = u16::from_le_bytes([lo, hi]);
+        CpuStep {
+            instruction: InstructionId::Unknown(0),
+            cycles: if self.state.emulation_mode { 7 } else { 8 },
+            master_ticks: master_ticks
+                + u64::from(
+                    (if self.state.emulation_mode {
+                        7u32
+                    } else {
+                        8u32
+                    })
+                    .saturating_sub(access_count),
+                ) * 6,
+            access_count,
+        }
+    }
+
+    /// Enters an interrupt at an already-resolved program-counter value.
+    /// Enhancement chips such as the SA-1 provide the final IRQ address in
+    /// their vector registers; those registers are not a second ROM vector
+    /// table and therefore must not be fetched again.
+    pub fn service_interrupt_at(
+        &mut self,
+        bus: &mut dyn CpuBus,
+        _kind: InterruptKind,
+        pc: u16,
+        mut trace: Option<&mut dyn TraceSink>,
+    ) -> CpuStep {
+        let mut master_ticks = 0;
+        let mut access_count = 0;
+        if !self.state.emulation_mode {
+            self.push_byte(
+                bus,
+                self.state.program_bank,
+                &mut trace,
+                &mut master_ticks,
+                &mut access_count,
+            );
+        }
+        self.push_word(
+            bus,
+            self.state.pc,
+            &mut trace,
+            &mut master_ticks,
+            &mut access_count,
+        );
+        self.push_byte(
+            bus,
+            self.state.status,
+            &mut trace,
+            &mut master_ticks,
+            &mut access_count,
+        );
+        self.state.status |= FLAG_IRQ_DISABLE;
+        self.state.status &= !0x08;
+        self.state.program_bank = 0;
+        self.state.waiting = false;
+        self.state.pc = pc;
         CpuStep {
             instruction: InstructionId::Unknown(0),
             cycles: if self.state.emulation_mode { 7 } else { 8 },

@@ -186,6 +186,31 @@ pub trait CartridgeDevice {
         false
     }
 
+    /// Returns and clears an interrupt raised for the SA-1 CPU by the S-CPU.
+    fn take_sa1_cpu_irq(&mut self) -> bool {
+        false
+    }
+
+    /// Returns and clears a reset request for the SA-1 CPU.
+    fn take_sa1_reset(&mut self) -> bool {
+        false
+    }
+
+    /// Returns and clears a ready request that releases an SA-1 stopped by STP.
+    fn take_sa1_ready(&mut self) -> bool {
+        false
+    }
+
+    /// Returns the vector used when the SA-1 raises an IRQ for the S-CPU.
+    fn sa1_snes_irq_vector(&self) -> Option<u16> {
+        None
+    }
+
+    /// Returns the vector used when the S-CPU raises an IRQ for the SA-1.
+    fn sa1_cpu_irq_vector(&self) -> Option<u16> {
+        None
+    }
+
     fn save_state(&self) -> Vec<u8> {
         Vec::new()
     }
@@ -205,6 +230,11 @@ pub(crate) struct RomOnlyCartridge {
     enhancement_registers: Vec<u8>,
     gsu: Option<Gsu>,
     sa1_irq_pending: bool,
+    sa1_cpu_irq_pending: bool,
+    sa1_reset_pending: bool,
+    sa1_ready_pending: bool,
+    scpu_open_bus: u8,
+    sa1_open_bus: u8,
 }
 
 impl RomOnlyCartridge {
@@ -215,17 +245,28 @@ impl RomOnlyCartridge {
         // validate the memory map independently of the enhancement CPU.
         let enhancement_ram_size = match chipset {
             0x10 => 0x10_000, // GSU/SuperFX game RAM window
-            0x30 => 0x20_000, // SA-1 BW-RAM window
+            0x30 => 0x4_0000, // SA-1 BW-RAM (256 KiB, mirrored in $40-$5f)
             0xf0 => 0x0c00,   // CX4 work RAM window
             _ => 0,
         };
+        let mut enhancement_registers = vec![0; 0x400];
+        if chipset == 0x30 {
+            // SA-1 powers up with BWPA selecting the full addressable
+            // BW-RAM range until software explicitly narrows it.
+            enhancement_registers[0x28] = 0x0f;
+        }
         Self {
             sram: vec![0; rom.metadata().sram_size],
             enhancement_ram: vec![0; enhancement_ram_size],
             enhancement_iram: vec![0; if chipset == 0x30 { 0x800 } else { 0 }],
-            enhancement_registers: vec![0; 0x400],
+            enhancement_registers,
             gsu: (chipset == 0x10).then(Gsu::new),
             sa1_irq_pending: false,
+            sa1_cpu_irq_pending: false,
+            sa1_reset_pending: false,
+            sa1_ready_pending: false,
+            scpu_open_bus: 0,
+            sa1_open_bus: 0,
             rom,
         }
     }
@@ -233,62 +274,24 @@ impl RomOnlyCartridge {
 
 impl CartridgeDevice for RomOnlyCartridge {
     fn read(&mut self, address: Address24) -> u8 {
-        let raw = address.get() as usize;
-        if let Some(index) = self.enhancement_index(raw) {
-            return match index {
-                EnhancementIndex::Ram(index) => self.enhancement_ram[index],
-                EnhancementIndex::BwRam(index) => self.enhancement_ram[index],
-                EnhancementIndex::IRam(index) => self.enhancement_iram[index],
-                EnhancementIndex::GsuCache(index) => self
-                    .gsu
-                    .as_ref()
-                    .map_or(0, |gsu| gsu.read_cache(index as u16)),
-                EnhancementIndex::Register(index) => self.read_enhancement_register(index),
-                EnhancementIndex::Fixed(value) => value,
-            };
+        let mapped_enhancement = self.enhancement_index(address.get() as usize).is_some();
+        let value = self.read_snes(address);
+        if mapped_enhancement {
+            self.scpu_open_bus = value;
         }
-        if let Some(index) = self.sram_index(raw) {
-            return self.sram[index];
-        }
-        let index = match self.rom.metadata().mapping {
-            MappingMode::LoRom => ((raw & 0x7f_0000) >> 1) | (raw & 0x7fff),
-            MappingMode::HiRom => (raw & 0x3f_0000) | (raw & 0xffff),
-        } % self.rom.as_bytes().len();
-        self.rom.as_bytes()[index]
+        value
     }
 
     fn write(&mut self, address: Address24, value: u8) {
-        let raw = address.get() as usize;
-        if let Some(index) = self.enhancement_index(raw) {
-            match index {
-                EnhancementIndex::Ram(index) => self.enhancement_ram[index] = value,
-                EnhancementIndex::BwRam(index) => {
-                    if self.sa1_bwram_write_allowed(index) {
-                        self.enhancement_ram[index] = value;
-                    }
-                }
-                EnhancementIndex::IRam(index) => {
-                    if self.sa1_iram_write_allowed(index, false) {
-                        self.enhancement_iram[index] = value;
-                    }
-                }
-                EnhancementIndex::GsuCache(index) => {
-                    if let Some(gsu) = self.gsu.as_mut() {
-                        gsu.write_cache(index as u16, value);
-                    }
-                }
-                EnhancementIndex::Register(index) => self.write_enhancement_register(index, value),
-                EnhancementIndex::Fixed(_) => {}
-            }
-        } else if let Some(index) = self.sram_index(raw) {
-            self.sram[index] = value;
-        }
+        self.scpu_open_bus = value;
+        self.write_snes(address, value);
     }
 
     fn read_sa1(&mut self, address: Address24) -> u8 {
         let raw = address.get() as usize;
-        if let Some(index) = self.sa1_enhancement_index(raw) {
-            return match index {
+        let mapped_enhancement = self.sa1_enhancement_index(raw).is_some();
+        let value = if let Some(index) = self.sa1_enhancement_index(raw) {
+            match index {
                 EnhancementIndex::BwRam(index) | EnhancementIndex::Ram(index) => {
                     self.enhancement_ram[index]
                 }
@@ -299,17 +302,29 @@ impl CartridgeDevice for RomOnlyCartridge {
                     .gsu
                     .as_ref()
                     .map_or(0, |gsu| gsu.read_cache(index as u16)),
-            };
+            }
+        } else if self.sa1_rom_mapped(raw) {
+            self.read_snes(address)
+        } else {
+            0
+        };
+        // SA-1 instruction fetches from ROM do not replace the coprocessor's
+        // I/O data-bus latch; the diagnostic relies on the latch seeded by
+        // the preceding register write/read sequence.
+        if mapped_enhancement {
+            self.sa1_open_bus = value;
         }
-        self.read(address)
+        value
     }
 
     fn write_sa1(&mut self, address: Address24, value: u8) {
         let raw = address.get() as usize;
+        self.sa1_open_bus = value;
         if let Some(index) = self.sa1_enhancement_index(raw) {
             match index {
                 EnhancementIndex::BwRam(index) => {
-                    if self.sa1_bwram_write_allowed(index) {
+                    self.sa1_open_bus = value;
+                    if self.sa1_bwram_write_allowed(self.sa1_bwram_protection_index(raw, index)) {
                         self.enhancement_ram[index] = value;
                     }
                 }
@@ -319,7 +334,9 @@ impl CartridgeDevice for RomOnlyCartridge {
                         self.enhancement_iram[index] = value;
                     }
                 }
-                EnhancementIndex::Register(index) => self.write_sa1_register_from_sa1(index, value),
+                EnhancementIndex::Register(index) => {
+                    self.write_sa1_register_from_sa1(index, value);
+                }
                 EnhancementIndex::Fixed(_) => {}
                 EnhancementIndex::GsuCache(index) => {
                     if let Some(gsu) = self.gsu.as_mut() {
@@ -328,7 +345,7 @@ impl CartridgeDevice for RomOnlyCartridge {
                 }
             }
         } else {
-            self.write(address, value);
+            self.write_snes(address, value);
         }
     }
 
@@ -347,6 +364,46 @@ impl CartridgeDevice for RomOnlyCartridge {
         let pending = self.sa1_irq_pending;
         self.sa1_irq_pending = false;
         pending
+    }
+
+    fn take_sa1_cpu_irq(&mut self) -> bool {
+        let pending = self.sa1_cpu_irq_pending;
+        self.sa1_cpu_irq_pending = false;
+        pending
+    }
+
+    fn take_sa1_reset(&mut self) -> bool {
+        let pending = self.sa1_reset_pending;
+        self.sa1_reset_pending = false;
+        pending
+    }
+
+    fn take_sa1_ready(&mut self) -> bool {
+        let pending = self.sa1_ready_pending;
+        self.sa1_ready_pending = false;
+        pending
+    }
+
+    fn sa1_snes_irq_vector(&self) -> Option<u16> {
+        if self.rom.metadata().chipset & 0xf0 != 0x30 {
+            return None;
+        }
+        (self.enhancement_registers[0x09] & 0x40 != 0).then(|| {
+            u16::from_le_bytes([
+                self.enhancement_registers[0x0e],
+                self.enhancement_registers[0x0f],
+            ])
+        })
+    }
+
+    fn sa1_cpu_irq_vector(&self) -> Option<u16> {
+        if self.rom.metadata().chipset & 0xf0 != 0x30 {
+            return None;
+        }
+        Some(u16::from_le_bytes([
+            self.enhancement_registers[0x07],
+            self.enhancement_registers[0x08],
+        ]))
     }
 
     fn access_speed(&self, _address: Address24) -> AccessSpeed {
@@ -379,17 +436,20 @@ impl CartridgeDevice for RomOnlyCartridge {
         state.extend_from_slice(&self.enhancement_ram);
         state.extend_from_slice(&self.enhancement_iram);
         state.extend_from_slice(&self.enhancement_registers);
+        state.push(self.scpu_open_bus);
+        state.push(self.sa1_open_bus);
         state
     }
 
     fn restore_state(&mut self, state: &[u8]) -> bool {
-        let expected = self.sram.len()
+        let memory_state_len = self.sram.len()
             + self.enhancement_ram.len()
             + self.enhancement_iram.len()
             + self.enhancement_registers.len();
-        if state.len() != expected {
+        if state.len() != memory_state_len && state.len() != memory_state_len + 2 {
             return false;
         }
+        let (state, latches) = state.split_at(memory_state_len);
         let (sram, state) = state.split_at(self.sram.len());
         self.sram.copy_from_slice(sram);
         let (ram, registers) = state.split_at(self.enhancement_ram.len());
@@ -397,16 +457,96 @@ impl CartridgeDevice for RomOnlyCartridge {
         let (iram, registers) = registers.split_at(self.enhancement_iram.len());
         self.enhancement_iram.copy_from_slice(iram);
         self.enhancement_registers.copy_from_slice(registers);
+        if latches.len() == 2 {
+            self.scpu_open_bus = latches[0];
+            self.sa1_open_bus = latches[1];
+        } else {
+            self.scpu_open_bus = 0;
+            self.sa1_open_bus = 0;
+        }
         true
     }
 }
 
 impl RomOnlyCartridge {
+    fn read_snes(&mut self, address: Address24) -> u8 {
+        let raw = address.get() as usize;
+        let bank = raw >> 16;
+        let offset = raw & 0xffff;
+        if self.rom.metadata().chipset & 0xf0 == 0x30
+            && (bank <= 0x3f || (0x80..=0xbf).contains(&bank))
+            && offset == 0xffee
+            && self.enhancement_registers[0x09] & 0x40 != 0
+        {
+            // With the SA-1 SNES IRQ vector override enabled, the ROM's
+            // native IRQ-vector low byte is the message byte supplied in
+            // SIVL.  SA-1 diagnostics read this address after entry.
+            return self.enhancement_registers[0x0e];
+        }
+        if let Some(index) = self.enhancement_index(raw) {
+            return match index {
+                EnhancementIndex::Ram(index) => self.enhancement_ram[index],
+                EnhancementIndex::BwRam(index) => self.enhancement_ram[index],
+                EnhancementIndex::IRam(index) => self.enhancement_iram[index],
+                EnhancementIndex::GsuCache(index) => self
+                    .gsu
+                    .as_ref()
+                    .map_or(0, |gsu| gsu.read_cache(index as u16)),
+                EnhancementIndex::Register(index) => self.read_enhancement_register(index),
+                EnhancementIndex::Fixed(value) => value,
+            };
+        }
+        if let Some(index) = self.sram_index(raw) {
+            return self.sram[index];
+        }
+        let index = match self.rom.metadata().mapping {
+            MappingMode::LoRom => ((raw & 0x7f_0000) >> 1) | (raw & 0x7fff),
+            MappingMode::HiRom => (raw & 0x3f_0000) | (raw & 0xffff),
+        } % self.rom.as_bytes().len();
+        self.rom.as_bytes()[index]
+    }
+
+    fn write_snes(&mut self, address: Address24, value: u8) {
+        let raw = address.get() as usize;
+        if let Some(index) = self.enhancement_index(raw) {
+            match index {
+                EnhancementIndex::Ram(index) => self.enhancement_ram[index] = value,
+                EnhancementIndex::BwRam(index) => {
+                    if self.sa1_bwram_write_allowed(self.sa1_bwram_protection_index(raw, index)) {
+                        self.enhancement_ram[index] = value;
+                    }
+                }
+                EnhancementIndex::IRam(index) => {
+                    if self.sa1_iram_write_allowed(index, false) {
+                        self.enhancement_iram[index] = value;
+                    }
+                }
+                EnhancementIndex::GsuCache(index) => {
+                    if let Some(gsu) = self.gsu.as_mut() {
+                        gsu.write_cache(index as u16, value);
+                    }
+                }
+                EnhancementIndex::Register(index) => self.write_enhancement_register(index, value),
+                EnhancementIndex::Fixed(_) => {}
+            }
+        } else if let Some(index) = self.sram_index(raw) {
+            self.sram[index] = value;
+        }
+    }
+
     fn enhancement_index(&self, raw: usize) -> Option<EnhancementIndex> {
         let chipset = self.rom.metadata().chipset & 0xf0;
         let bank = raw >> 16;
         let offset = raw & 0xffff;
         let system_bank = bank <= 0x3f || (0x80..=0xbf).contains(&bank);
+        if chipset == 0x30 && (0x40..=0x4f).contains(&bank) {
+            // The S-CPU's direct BW-RAM window decodes 256 KiB and mirrors
+            // it through banks $40-$4f.  The SA-1 has a separate, larger
+            // direct window handled by sa1_enhancement_index below.
+            return Some(EnhancementIndex::BwRam(
+                (((bank - 0x40) & 0x03) * 0x10000 + offset) % self.enhancement_ram.len(),
+            ));
+        }
         if !system_bank {
             return None;
         }
@@ -427,7 +567,7 @@ impl RomOnlyCartridge {
             }
             // SA-1 I-RAM is visible to the SNES CPU at $3000-$37ff.
             0x30 if (0x3000..=0x37ff).contains(&offset) => {
-                Some(EnhancementIndex::IRam(offset - 0x3000))
+                Some(EnhancementIndex::IRam((offset - 0x3000) & 0x07ff))
             }
             // BMAPS selects the 8 KiB BW-RAM page visible to the SNES CPU.
             0x30 if (0x6000..=0x7fff).contains(&offset) => Some(EnhancementIndex::BwRam(
@@ -473,7 +613,7 @@ impl RomOnlyCartridge {
         if system_bank && (0x2200..=0x23ff).contains(&offset) {
             return Some(EnhancementIndex::Register(offset - 0x2200));
         }
-        if system_bank && offset < 0x4000 {
+        if system_bank && ((offset < 0x0800) || (0x3000..0x3800).contains(&offset)) {
             return Some(EnhancementIndex::IRam(offset & 0x07ff));
         }
         if (0x40..=0x5f).contains(&bank) {
@@ -481,7 +621,18 @@ impl RomOnlyCartridge {
                 ((bank - 0x40) * 0x10000 + offset) % self.enhancement_ram.len(),
             ));
         }
+        if system_bank && (0x6000..=0x7fff).contains(&offset) {
+            return Some(EnhancementIndex::BwRam(
+                self.sa1_bwram_index(offset - 0x6000, true),
+            ));
+        }
         None
+    }
+
+    fn sa1_rom_mapped(&self, raw: usize) -> bool {
+        let bank = raw >> 16;
+        let offset = raw & 0xffff;
+        (bank <= 0x3f || (0x80..=0xbf).contains(&bank)) && offset >= 0x8000 || bank >= 0xc0
     }
 
     fn sa1_bwram_index(&self, offset: usize, _sa1_cpu: bool) -> usize {
@@ -491,6 +642,17 @@ impl RomOnlyCartridge {
             self.enhancement_registers[0x24] & 0x1f
         };
         (usize::from(mapping) * 0x2000 + offset) % self.enhancement_ram.len()
+    }
+
+    fn sa1_bwram_protection_index(&self, raw: usize, mapped_index: usize) -> usize {
+        let bank = raw >> 16;
+        if (0x40..=0x5f).contains(&bank) {
+            // The protection comparator tops out at $43ffff even though the
+            // address decoder mirrors the BW-RAM window into later banks.
+            ((bank - 0x40) * 0x10000 + (raw & 0xffff)).min(0x3ffff)
+        } else {
+            mapped_index
+        }
     }
 
     fn sa1_bwram_write_allowed(&self, index: usize) -> bool {
@@ -567,13 +729,33 @@ impl RomOnlyCartridge {
                     gsu.set_cache_base(updated);
                 }
             }
-            0x30 => self.write_sa1_register(index, value),
+            0x30 => {
+                // These controls belong to the SA-1 side and are not
+                // writable through the S-CPU register view.
+                if matches!(index, 0x25 | 0x27 | 0x2a) {
+                    return;
+                }
+                self.write_sa1_register(index, value);
+                // CCNT bit 7 is the S-CPU-to-SA-1 IRQ request.  Keep this
+                // edge in the cartridge so the second CPU can service it at
+                // its next scheduling point.
+                if index == 0x00 && value & 0x80 != 0 {
+                    self.sa1_cpu_irq_pending = true;
+                }
+                if index == 0x00 && value & 0x20 != 0 {
+                    self.sa1_reset_pending = true;
+                    self.enhancement_registers[0x2a] = 0;
+                }
+                if index == 0x00 && value & 0x40 != 0 {
+                    self.sa1_ready_pending = true;
+                }
+            }
             0xf0 => self.write_cx4_register(index, value),
             _ => self.enhancement_registers[index] = value,
         }
     }
 
-    fn read_enhancement_register(&self, index: usize) -> u8 {
+    fn read_enhancement_register(&mut self, index: usize) -> u8 {
         if self.rom.metadata().chipset & 0xf0 == 0x10 {
             match index {
                 0x00..=0x1f => {
@@ -590,12 +772,21 @@ impl RomOnlyCartridge {
             }
         } else if self.rom.metadata().chipset & 0xf0 == 0x30 {
             match index {
+                // The control/vector registers at $2200-$2215 are visible
+                // through the S-CPU register window.  Keep these separate
+                // from the $2300 status/read ports below; returning the
+                // status-port default for the low indexes breaks the SA-1
+                // message and reboot handshakes that poll these registers.
+                0x00..=0x0f => self.scpu_open_bus,
+                // SFR is the S-CPU's read view of the SA-1 control/message
+                // flag (SCNT), while CFR is the SA-1's read view of the
+                // S-CPU control/message flag (CCNT).
                 0x100 => self.enhancement_registers[0x09],
-                0x101 => self.enhancement_registers[0x00],
-                0x10e => 0,
-                // The status/timer/math read ports start clear until a
-                // coprocessor execution core supplies live values.
-                0x102..=0x10d => self.enhancement_registers[index],
+                // The remaining ports are either SA-1-owned or undefined
+                // from the S-CPU bus.  They retain the last S-CPU bus value.
+                0x101..=0x10d | 0x10f..=0x110 => self.scpu_open_bus,
+                // VC reports the SA-1 device revision used by the RF5A123.
+                0x10e => 0x23,
                 _ => 0,
             }
         } else if self.rom.metadata().chipset & 0xf0 == 0xf0 {
@@ -638,14 +829,22 @@ impl RomOnlyCartridge {
 
     fn read_sa1_register(&self, index: usize) -> u8 {
         match index {
-            0x100 => self.enhancement_registers[0x09],
+            // SFR is S-CPU-only; the SA-1 sees its own bus latch here.
+            0x100 => self.sa1_open_bus,
             0x101 => self.enhancement_registers[0x00],
-            0x10e => 0,
-            _ => self.enhancement_registers[index],
+            0x102..=0x10d => self.enhancement_registers[index],
+            0x10e => 0x23,
+            _ => self.sa1_open_bus,
         }
     }
 
     fn write_sa1_register_from_sa1(&mut self, index: usize, value: u8) {
+        // The complementary controls are S-CPU-only.  The hardware ignores
+        // an attempt by the SA-1 core to write them rather than sharing the
+        // register storage between the two bus masters.
+        if matches!(index, 0x01 | 0x24 | 0x26 | 0x28 | 0x29) {
+            return;
+        }
         self.write_sa1_register(index, value);
         if index == 0x09 && value & 0x80 != 0 && self.enhancement_registers[0x01] & 0x80 != 0 {
             self.sa1_irq_pending = true;
@@ -899,6 +1098,97 @@ mod tests {
         cartridge.write(Address24::new(0x002224), 0x00);
         cartridge.write(Address24::new(0x006000), 0x33);
         assert_eq!(cartridge.read(Address24::new(0x006000)), 0);
+    }
+
+    #[test]
+    fn sa1_iram_write_protection_uses_the_snes_view_only_for_snes_accesses() {
+        let mut rom = vec![0; 0x8000];
+        rom[0x7fd5] = 0x23;
+        rom[0x7fd6] = 0x35;
+        let mut cartridge = RomOnlyCartridge::new(RomImage::load(rom).unwrap());
+
+        cartridge.write(Address24::new(0x002229), 0x00);
+        cartridge.write(Address24::new(0x003000), 0xaa);
+        assert_eq!(cartridge.read(Address24::new(0x003000)), 0);
+
+        cartridge.write(Address24::new(0x002229), 0x01);
+        cartridge.write(Address24::new(0x003000), 0x55);
+        assert_eq!(cartridge.read(Address24::new(0x003000)), 0x55);
+
+        cartridge.write_sa1(Address24::new(0x00222a), 0x00);
+        cartridge.write_sa1(Address24::new(0x000000), 0xcc);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x000000)), 0x55);
+    }
+
+    #[test]
+    fn snes_iram_writes_are_visible_through_sa1_mirrors() {
+        let mut rom = vec![0; 0x8000];
+        rom[0x7fd5] = 0x23;
+        rom[0x7fd6] = 0x35;
+        let mut cartridge = RomOnlyCartridge::new(RomImage::load(rom).unwrap());
+        cartridge.write(Address24::new(0x002229), 0xff);
+        cartridge.write(Address24::new(0x003000), 0xaa);
+        for address in [0x003000, 0x3f3000, 0x803000, 0xbf3000] {
+            assert_eq!(
+                cartridge.read(Address24::new(address)),
+                0xaa,
+                "${address:06x}"
+            );
+        }
+        assert_eq!(cartridge.read_sa1(Address24::new(0x000000)), 0xaa);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x3f0000)), 0xaa);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x800000)), 0xaa);
+        assert_eq!(cartridge.read_sa1(Address24::new(0xbf0000)), 0xaa);
+    }
+
+    #[test]
+    fn sa1_register_read_ports_have_cpu_specific_open_bus_ownership() {
+        let mut rom = vec![0; 0x8000];
+        rom[0x7fd5] = 0x23;
+        rom[0x7fd6] = 0x35;
+        let mut cartridge = RomOnlyCartridge::new(RomImage::load(rom).unwrap());
+
+        // S-CPU status is readable, but the neighboring SA-1/undefined
+        // ports retain the S-CPU bus value. VC is the one fixed read port.
+        cartridge.write(Address24::new(0x002300), 0);
+        assert_eq!(cartridge.read(Address24::new(0x002300)), 0);
+        assert_eq!(cartridge.read(Address24::new(0x002301)), 0);
+        assert_eq!(cartridge.read(Address24::new(0x00230d)), 0);
+        assert_eq!(cartridge.read(Address24::new(0x00230e)), 0x23);
+        assert_eq!(cartridge.read(Address24::new(0x00230f)), 0x23);
+        assert_eq!(cartridge.read(Address24::new(0x002310)), 0x23);
+
+        // The SA-1 has its own latch. Its $2300 view is S-CPU-only, while
+        // $2301 is the SA-1's CCNT status port.
+        cartridge.write_sa1(Address24::new(0x002300), 0x5a);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x002300)), 0x5a);
+        cartridge.write(Address24::new(0x002200), 0xa5);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x002301)), 0xa5);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x00230e)), 0x23);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x00230f)), 0x23);
+
+        // An SA-1 ROM fetch must not change the S-CPU latch.
+        cartridge.write(Address24::new(0x002301), 0x66);
+        let _ = cartridge.read_sa1(Address24::new(0x008000));
+        assert_eq!(cartridge.read(Address24::new(0x002301)), 0x66);
+    }
+
+    #[test]
+    fn sa1_register_open_bus_latches_round_trip_through_state() {
+        let mut rom = vec![0; 0x8000];
+        rom[0x7fd5] = 0x23;
+        rom[0x7fd6] = 0x35;
+        let mut cartridge = RomOnlyCartridge::new(RomImage::load(rom).unwrap());
+
+        cartridge.write(Address24::new(0x002301), 0x12);
+        cartridge.write_sa1(Address24::new(0x00230f), 0x34);
+        let state = cartridge.save_state();
+
+        cartridge.write(Address24::new(0x002301), 0xa5);
+        cartridge.write_sa1(Address24::new(0x00230f), 0x5a);
+        assert!(cartridge.restore_state(&state));
+        assert_eq!(cartridge.read(Address24::new(0x002301)), 0x12);
+        assert_eq!(cartridge.read_sa1(Address24::new(0x00230f)), 0x34);
     }
 
     #[test]
