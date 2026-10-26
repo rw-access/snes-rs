@@ -108,8 +108,8 @@ For Cloudflare Workers Builds, connect the `snes-rs` Worker to this repository
 with build command `bash scripts/build-cloudflare.sh` and deploy command
 `npx --yes wrangler@4.152.0 deploy`. The Wrangler config serves the generated
 frontend at `rw-access.dev/play/snes-rs/`; build output stays under ignored
-`_site/play/snes-rs/`. The portfolio Worker redirects retired `/snes-rs/` URLs
-to `/play/snes-rs/`; this Worker serves only the canonical game path.
+`_site/play/snes-rs/`. This Worker serves only the canonical `/play/snes-rs/`
+game path.
 
 Replay an lsnes SNES movie (`.lsmv`) into an MP4. The movie contains one
 controller sample per frame; the exporter also writes the emulator's stereo
