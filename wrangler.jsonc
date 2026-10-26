@@ -6,6 +6,8 @@
   },
   "routes": [
     { "pattern": "rw-access.dev/snes-rs", "zone_name": "rw-access.dev" },
-    { "pattern": "rw-access.dev/snes-rs/*", "zone_name": "rw-access.dev" }
+    { "pattern": "rw-access.dev/snes-rs/*", "zone_name": "rw-access.dev" },
+    { "pattern": "www.rw-access.dev/snes-rs", "zone_name": "rw-access.dev" },
+    { "pattern": "www.rw-access.dev/snes-rs/*", "zone_name": "rw-access.dev" }
   ]
 }
