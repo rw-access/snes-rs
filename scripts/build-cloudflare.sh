@@ -11,10 +11,9 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
   cargo install wasm-pack --locked
 fi
 wasm-pack build crates/snes-wasm --target web --release --out-dir ../../web/pkg
-# Publish the /play/ URL and preserve the previous prefix for bookmarks.
-for asset_dir in _site/play/snes-rs _site/snes-rs; do
-  mkdir -p "$asset_dir/pkg"
-  cp web/index.html web/app.js web/style.css "$asset_dir/"
-  cp -R web/pkg/. "$asset_dir/pkg/"
-  touch "$asset_dir/.nojekyll"
-done
+# Clear generated output so retired URL prefixes are not uploaded again.
+rm -rf _site
+mkdir -p _site/play/snes-rs/pkg
+cp web/index.html web/app.js web/style.css _site/play/snes-rs/
+cp -R web/pkg/. _site/play/snes-rs/pkg/
+touch _site/play/snes-rs/.nojekyll
