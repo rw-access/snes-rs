@@ -107,8 +107,9 @@ deploys the static browser frontend to GitHub Pages on pushes to `main`.
 For Cloudflare Workers Builds, connect the `snes-rs` Worker to this repository
 with build command `bash scripts/build-cloudflare.sh` and deploy command
 `npx --yes wrangler@4.152.0 deploy`. The Wrangler config serves the generated
-frontend at `rw-access.dev/snes-rs/`; build output stays under ignored
-`_site/snes-rs/`.
+frontend at `rw-access.dev/play/snes-rs/`; build output stays under ignored
+`_site/play/snes-rs/`. The previous `/snes-rs/` URLs are also staged and routed
+to this Worker so existing bookmarks keep working.
 
 Replay an lsnes SNES movie (`.lsmv`) into an MP4. The movie contains one
 controller sample per frame; the exporter also writes the emulator's stereo
