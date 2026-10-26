@@ -1,4 +1,7 @@
 /target/
+/_site/
+.dev.vars
+.wrangler/
 Cargo.lock
 
 # Local ROMs and generated test artifacts.

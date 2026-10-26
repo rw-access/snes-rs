@@ -104,6 +104,12 @@ cargo build --release -p snes-ffi
 The repository also includes `.github/workflows/pages.yml`, which builds and
 deploys the static browser frontend to GitHub Pages on pushes to `main`.
 
+For Cloudflare Workers Builds, connect the `snes-rs` Worker to this repository
+with build command `bash scripts/build-cloudflare.sh` and deploy command
+`npx --yes wrangler@4.152.0 deploy`. The Wrangler config serves the generated
+frontend at `rw-access.dev/snes-rs/`; build output stays under ignored
+`_site/snes-rs/`.
+
 Replay an lsnes SNES movie (`.lsmv`) into an MP4. The movie contains one
 controller sample per frame; the exporter also writes the emulator's stereo
 audio into the MP4. Use `--sample-dir` to retain PPM frames for visual review

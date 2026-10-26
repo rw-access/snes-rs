@@ -1,0 +1,11 @@
+{
+  "name": "snes-rs",
+  "compatibility_date": "2026-10-25",
+  "assets": {
+    "directory": "./_site"
+  },
+  "routes": [
+    { "pattern": "rw-access.dev/snes-rs", "zone_name": "rw-access.dev" },
+    { "pattern": "rw-access.dev/snes-rs/*", "zone_name": "rw-access.dev" }
+  ]
+}
